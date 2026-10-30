@@ -1,0 +1,15 @@
+# Copy to arden.toml to override defaults. A missing arden.toml uses these values.
+
+[world]
+# Simulation ticks per real-time second.
+tick_rate = 10.0
+# Seed for the single simulation RNG.
+seed = 0
+
+[llm]
+# "mock" is the only backend implemented so far.
+backend = "mock"
+
+[logging]
+# Process log level. Separate from the observer log.
+level = "INFO"

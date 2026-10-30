@@ -1,6 +1,11 @@
-venv/
 __pycache__/
-.pytest_cache/
+*.py[cod]
 *.egg-info/
-data/
-logs/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+
+# Local config. The committed template is arden.example.toml.
+/arden.toml
