@@ -42,3 +42,14 @@ The hardware section says the model replies with "intent, target, parameters, a 
 - A script queue of raw strings is consumed from the front before any fixture draw. Those strings may be invalid JSON. A scripted call does not advance the seed. Fixture files are `src/arden/llm/fixtures/*.json`, sorted by filename.
 - Every response is parsed as JSON and checked against the `schema` argument. The checker covers the JSON Schema subset Pydantic emits for these models (`type`, `enum`, `required`, `properties`, `additionalProperties`, `items`, `minimum`, `maximum`, `anyOf`, and local `$ref`). Invalid output raises `LLMOutputError` with the raw text on `.raw`. No schema library was added.
 - `role` must be `decide`, `reflect`, or `name`. Anything else raises `ValueError` and does not consume a scripted response. Reflect and name do not have their own models yet. Callers pass whatever schema those roles should return. The canned fixtures are intents.
+
+## T05 — World state, fixed tick loop, clock, and save/load
+
+These choices fill in container, event, clock, and snapshot details not fixed by the design doc.
+
+- `AgentBody` holds `position` (default `(0.0, 0.0)`), `level` (default `"ground"`), `energy` (in `0..1`, default `1.0`), `comfort` (in `0..1`, default `1.0`), and `holding` (`None` or an `object_<n>` id). Despawning a held object clears `holding`.
+- `World` stores objects by id in `world.objects`, the agent body on `world.body` (aliased as `world.agent_body`), the tick counter on `world.tick`, the seeded `random.Random` on `world.rng`, and an internal `ObjectFactory` so creator spawns issue sequential `object_<n>` ids. `step()` increments `tick` by 1, advances `rng` once per tick, and emits a `tick` event.
+- `EventBus` (`world.events`) delivers typed `WorldEvent` subclasses (`ObjectSpawnedEvent`, `ObjectDespawnedEvent`, `ObjectMovedEvent`, `ObjectChangedEvent`, `TickEvent`) synchronously in registration order. Subscribers can listen to all events (`world.subscribe(fn)`) or a single event type (`world.subscribe("object_spawned", fn)`).
+- Creator operations `world.spawn(props, pos)`, `world.despawn(id)`, and `world.move(id, pos)` default to `source="creator"` on the emitted event. `world.update_object(id, changes)` updates properties/state and emits `object_changed` (default `source="world"`).
+- `WorldClock` (`Clock`) wraps a `World` and `tick_rate`, supporting `pause()`, `resume()`, `set_speed(x)` (`x > 0`), `step_once()` (steps 1 tick even while paused), `advance(dt)` (accumulates simulated seconds without sleeping), and `run(ticks)` (runs up to `ticks` steps while unpaused, defaulting to no sleeping for synchronous tests).
+- `snapshot()` serializes `tick`, `body`, `objects` (including hidden `behavior` rules), `factory` id state, and `rng.getstate()` to a deterministic JSON string (`sort_keys=True`). `restore()` works on both an existing `World` instance and on the `World` class.
