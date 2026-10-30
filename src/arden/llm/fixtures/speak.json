@@ -1,0 +1,10 @@
+{
+  "goal": "call out toward the trees",
+  "steps": [
+    {"verb": "speak", "target": null, "params": {"text": "hello"}}
+  ],
+  "wake_if": ["a sound answers"],
+  "expect": "no answer",
+  "thought": "Nobody may be listening, but I can still try.",
+  "confidence": 0.2
+}
