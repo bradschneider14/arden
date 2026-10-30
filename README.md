@@ -1,2 +1,1 @@
-placeholder
-
+Arden is a locally run virtual world where an embodied agent explores, learns about itself, and communicates with its creator, with no assigned objective. Behavior is meant to emerge from drives, perception, and memory. The architecture and decisions are in [docs/DESIGN.md](docs/DESIGN.md).
