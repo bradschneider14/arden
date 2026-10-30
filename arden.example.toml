@@ -6,6 +6,16 @@ tick_rate = 10.0
 # Seed for the single simulation RNG.
 seed = 0
 
+[perception]
+# Base sensing radius in world units (meters).
+sensing_radius = 10.0
+# Reach distance for interacting with objects and their affordances.
+reach_radius = 1.5
+# Minimum distance an object must move to report a movement delta.
+move_threshold = 0.1
+# Visibility factor at or below which fine detail such as color is dropped.
+color_visibility_threshold = 0.75
+
 [llm]
 # "mock" is the only backend implemented so far.
 backend = "mock"
