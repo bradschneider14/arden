@@ -1,7 +1,26 @@
 """World simulation types shared by the sim, perception, and the web client."""
 
 from arden.world.clock import Clock, WorldClock
-from arden.world.objects import BehaviorRule, ObjectFactory, Position, WorldObject
+from arden.world.objects import (
+    BehaviorRule,
+    ObjectFactory,
+    Position,
+    Velocity,
+    WorldObject,
+    object_radius,
+)
+from arden.world.physics import (
+    TILE_TYPES,
+    TerrainGrid,
+    Tile,
+    TileType,
+    apply_impulse,
+    is_occluded,
+    is_stack_stable,
+    max_carry_step,
+    object_top_height,
+    objects_overlap,
+)
 from arden.world.world import (
     EVENT_TYPES,
     AgentBody,
@@ -18,6 +37,7 @@ from arden.world.world import (
 
 __all__ = [
     "EVENT_TYPES",
+    "TILE_TYPES",
     "AgentBody",
     "BehaviorRule",
     "Clock",
@@ -29,9 +49,20 @@ __all__ = [
     "ObjectMovedEvent",
     "ObjectSpawnedEvent",
     "Position",
+    "TerrainGrid",
     "TickEvent",
+    "Tile",
+    "TileType",
+    "Velocity",
     "World",
     "WorldClock",
     "WorldEvent",
     "WorldObject",
+    "apply_impulse",
+    "is_occluded",
+    "is_stack_stable",
+    "max_carry_step",
+    "object_radius",
+    "object_top_height",
+    "objects_overlap",
 ]

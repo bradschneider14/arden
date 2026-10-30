@@ -76,6 +76,86 @@ class Position(BaseModel):
         return value
 
 
+class Velocity(BaseModel):
+    """2D velocity vector on the movement plane (meters per tick)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = 0.0
+    y: float = 0.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_velocity(cls, data: Any) -> Any:
+        if isinstance(data, tuple | list) and len(data) == 2:
+            return {"x": data[0], "y": data[1]}
+        if isinstance(data, Mapping):
+            d = dict(data)
+            if "vx" in d or "vy" in d:
+                if "x" not in d and "vx" in d:
+                    d["x"] = d.pop("vx")
+                if "y" not in d and "vy" in d:
+                    d["y"] = d.pop("vy")
+            return d
+        if hasattr(data, "x") and hasattr(data, "y") and not isinstance(data, cls):
+            return {"x": data.x, "y": data.y}
+        return data
+
+    @field_validator("x", "y")
+    @classmethod
+    def components_are_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("velocity components must be finite")
+        return value
+
+    @property
+    def vx(self) -> float:
+        """Alias for ``x``."""
+        return self.x
+
+    @property
+    def vy(self) -> float:
+        """Alias for ``y``."""
+        return self.y
+
+    @property
+    def speed(self) -> float:
+        """Euclidean speed ``hypot(x, y)``."""
+        return math.hypot(self.x, self.y)
+
+
+MIN_OBJECT_RADIUS: float = 0.05
+MAX_OBJECT_RADIUS: float = 2.0
+
+
+def object_radius(obj: WorldObject) -> float:
+    """Compute the 2D collision circle radius for ``obj`` from its physical properties."""
+    explicit_r = obj.state.get("radius")
+    if isinstance(explicit_r, int | float) and not isinstance(explicit_r, bool):
+        r_val = float(explicit_r)
+        if math.isfinite(r_val) and r_val > 0.0:
+            return r_val
+
+    if obj.shape == "sphere":
+        r_h = obj.height / 2.0 if obj.height > 0.0 else 0.0
+        r_v = (
+            (3.0 * obj.volume / (4.0 * math.pi)) ** (1.0 / 3.0)
+            if obj.volume > 0.0
+            else 0.0
+        )
+        raw = max(r_h, r_v)
+    elif obj.volume > 0.0 and obj.height > 0.0:
+        raw = math.sqrt(obj.volume / (math.pi * obj.height))
+    elif obj.volume > 0.0:
+        raw = (obj.volume / math.pi) ** (1.0 / 3.0)
+    elif obj.height > 0.0:
+        raw = obj.height * 0.5
+    else:
+        raw = 0.0
+
+    return min(MAX_OBJECT_RADIUS, max(MIN_OBJECT_RADIUS, raw))
+
+
 class BehaviorRule(BaseModel):
     """One hidden response to a body verb.
 
@@ -113,8 +193,14 @@ class WorldObject(BaseModel):
     fragile: bool = False
     color: str | None = None
     fixed: bool = False
+    velocity: Velocity = Field(default_factory=Velocity)
     state: dict[str, Any] = Field(default_factory=dict)
     behavior: list[BehaviorRule] = Field(default_factory=list)
+
+    @property
+    def radius(self) -> float:
+        """2D collision circle radius derived from physical properties."""
+        return object_radius(self)
 
     @field_validator("level")
     @classmethod
@@ -154,7 +240,7 @@ class WorldObject(BaseModel):
         Hidden ``behavior`` rules are omitted. Color is omitted when unset.
         The id is the referent (``object_7``), not a name derived from it.
         """
-        data = self.model_dump(mode="json", exclude={"behavior"})
+        data = self.model_dump(mode="json", exclude={"behavior", "velocity"})
         if data.get("color") is None:
             del data["color"]
         unexpected = set(data) - _PERCEPTIBLE_FIELDS

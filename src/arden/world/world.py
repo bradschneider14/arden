@@ -11,7 +11,29 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from arden.world.objects import ObjectFactory, Position, WorldObject
+from arden.world.objects import ObjectFactory, Position, Velocity, WorldObject, object_radius
+from arden.world.physics import (
+    COLLISION_ITERATIONS,
+    COLLISION_RESTITUTION,
+    DEFAULT_OCCLUSION_TOLERANCE,
+    MAX_SUBSTEP_DISTANCE,
+    MAX_SUBSTEPS,
+    SEPARATION_SLOP,
+    SHAPE_RETENTION,
+    STOP_SPEED_EPSILON,
+    WATER_DRIFT_STRENGTH,
+    WATER_FLOAT_MAX_WEIGHT,
+    WATER_SINK_DRAG,
+    TerrainGrid,
+    Tile,
+    TileType,
+    _set_active_world,
+    compute_impulse_delta,
+    is_occluded as _is_occluded_helper,
+    is_stack_stable,
+    max_carry_step,
+    object_top_height,
+)
 
 _OBJECT_ID = re.compile(r"^object_[0-9]+$")
 _LEVEL = re.compile(r"^(?:ground|raised|on_top_of:object_[0-9]+|inside:object_[0-9]+)$")
@@ -272,6 +294,7 @@ class World:
         objects: Iterable[WorldObject | Mapping[str, Any]]
         | Mapping[str, WorldObject | Mapping[str, Any]]
         | None = None,
+        terrain: TerrainGrid | Mapping[str, Any] | None = None,
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -295,6 +318,15 @@ class World:
         else:
             raise TypeError("body must be an AgentBody, a mapping, or None")
 
+        if terrain is None:
+            self.terrain: TerrainGrid = TerrainGrid()
+        elif isinstance(terrain, TerrainGrid):
+            self.terrain = TerrainGrid.from_dict(terrain.to_dict())
+        elif isinstance(terrain, Mapping):
+            self.terrain = TerrainGrid.from_dict(terrain)
+        else:
+            raise TypeError("terrain must be a TerrainGrid, a mapping, or None")
+
         self.tick: int = 0
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
@@ -314,6 +346,8 @@ class World:
                 else:
                     raise TypeError("objects must contain WorldObject instances or mappings")
                 self.objects[created.id] = created
+
+        _set_active_world(self)
 
     @property
     def agent_body(self) -> AgentBody:
@@ -351,6 +385,7 @@ class World:
         source: str = "creator",
     ) -> WorldObject:
         """Create and add an object to the world, emitting ``object_spawned``."""
+        _set_active_world(self)
         if isinstance(props, WorldObject):
             data = props.model_dump()
         elif isinstance(props, Mapping):
@@ -377,11 +412,14 @@ class World:
 
     def despawn(self, object_id: str, *, source: str = "creator") -> WorldObject:
         """Remove an object by id, emitting ``object_despawned``."""
+        _set_active_world(self)
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         obj = self.objects.pop(object_id)
         if self.body.holding == object_id:
             self.body.holding = None
+        if self.body.level == f"on_top_of:{object_id}":
+            self.body.level = "raised" if self.terrain.is_ledge(self.body.position) else "ground"
         self.events.emit(
             ObjectDespawnedEvent(
                 tick=self.tick,
@@ -391,6 +429,11 @@ class World:
                 object=obj.model_dump(mode="json"),
             )
         )
+        # Topple any objects that were resting on top of the despawned object
+        for upper_id in sorted(self.objects):
+            upper = self.objects.get(upper_id)
+            if upper is not None and upper.level == f"on_top_of:{object_id}":
+                self._topple_object(upper.id, support=obj, move_dx=0.0, move_dy=0.0)
         return obj
 
     def move(
@@ -401,6 +444,7 @@ class World:
         source: str = "creator",
     ) -> WorldObject:
         """Move an existing object to ``pos``, emitting ``object_moved``."""
+        _set_active_world(self)
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         new_pos = _coerce_position(pos)
@@ -417,7 +461,13 @@ class World:
                 position=new_pos,
             )
         )
-        return updated
+        self._propagate_support_movement(
+            object_id,
+            previous_pos=previous_pos,
+            new_pos=new_pos,
+            source=source,
+        )
+        return self.objects[object_id]
 
     def update_object(
         self,
@@ -427,6 +477,7 @@ class World:
         source: str = "world",
     ) -> WorldObject:
         """Update properties or state on an object, emitting ``object_changed``."""
+        _set_active_world(self)
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         if not isinstance(changes, Mapping):
@@ -451,17 +502,768 @@ class World:
         )
         return updated
 
+    def set_tile(
+        self,
+        x_or_pos: int | float | Position | Mapping[str, Any] | tuple[float, float] | list[float],
+        y_or_tile: int | float | Tile | TileType | Mapping[str, Any] | None = None,
+        tile: Tile | TileType | Mapping[str, Any] | None = None,
+        *,
+        flow: Velocity | Position | Mapping[str, Any] | tuple[float, float] | list[float] | None = None,
+    ) -> Tile:
+        """Set a terrain tile on ``self.terrain``."""
+        return self.terrain.set_tile(x_or_pos, y_or_tile, tile, flow=flow)
+
+    def tile_at(
+        self,
+        x_or_pos: float | Position | Mapping[str, Any] | tuple[float, float] | list[float],
+        y: float | None = None,
+    ) -> Tile:
+        """Return the terrain ``Tile`` at ``pos``."""
+        return self.terrain.get_tile(x_or_pos, y)
+
+    def can_reach(
+        self,
+        target_pos: Position | Mapping[str, Any] | tuple[float, float] | list[float],
+        *,
+        from_pos: Position | Mapping[str, Any] | tuple[float, float] | list[float] | None = None,
+        from_level: str | None = None,
+    ) -> bool:
+        """Return True if ``target_pos`` is reachable from ``from_pos`` and ``from_level``."""
+        origin_pos = self.body.position if from_pos is None else _coerce_position(from_pos)
+        origin_level = self.body.level if from_level is None else from_level
+        return self.terrain.can_reach(
+            target_pos,
+            from_pos=origin_pos,
+            from_level=origin_level,
+            objects=self.objects,
+        )
+
+    can_reach_tile = can_reach
+
+    def climb_onto(self, object_id: str) -> bool:
+        """Climb the agent body onto ``object_id`` if reachable and tall enough."""
+        _set_active_world(self)
+        if object_id not in self.objects:
+            raise KeyError(f"unknown object id: {object_id}")
+        target = self.objects[object_id]
+        if self.body.holding == object_id or target.height <= 0.0:
+            return False
+        if target.level == "raised" and self.body.level == "ground":
+            return False
+        dist = math.hypot(
+            target.position.x - self.body.position.x,
+            target.position.y - self.body.position.y,
+        )
+        if dist > target.radius + 1.5:
+            return False
+        self.body.position = target.position.model_copy()
+        self.body.level = f"on_top_of:{object_id}"
+        return True
+
+    def move_agent(
+        self,
+        target_pos: Position | Mapping[str, Any] | tuple[float, float] | list[float],
+    ) -> bool:
+        """Move the agent body to ``target_pos`` if terrain level rules allow it."""
+        _set_active_world(self)
+        dest = _coerce_position(target_pos)
+        if not self.can_reach(dest):
+            return False
+        dest_tile = self.terrain.get_tile(dest)
+        self.body.position = dest
+        self.body.level = "raised" if dest_tile.type == "ledge" else "ground"
+        return True
+
+    def apply_impulse(
+        self,
+        object_id: str,
+        direction: Position | Velocity | Mapping[str, Any] | tuple[float, float] | list[float] | str | int | float,
+        force: float,
+    ) -> WorldObject:
+        """Apply a directional impulse of ``force`` to ``object_id``."""
+        _set_active_world(self)
+        if object_id not in self.objects:
+            raise KeyError(f"unknown object id: {object_id}")
+        obj = self.objects[object_id]
+        dv = compute_impulse_delta(obj, direction, force)
+        if dv.speed > 0.0:
+            new_vel = Velocity(x=obj.velocity.x + dv.x, y=obj.velocity.y + dv.y)
+            self.objects[object_id] = obj.model_copy(update={"velocity": new_vel})
+        return self.objects[object_id]
+
+    def stack(
+        self,
+        upper_id: str,
+        lower_id: str,
+        *,
+        source: str = "world",
+    ) -> WorldObject:
+        """Place ``upper_id`` on top of ``lower_id``, toppling immediately if unstable."""
+        _set_active_world(self)
+        if upper_id not in self.objects:
+            raise KeyError(f"unknown object id: {upper_id}")
+        if lower_id not in self.objects:
+            raise KeyError(f"unknown object id: {lower_id}")
+        if upper_id == lower_id:
+            raise ValueError("cannot stack an object on top of itself")
+
+        lower = self.objects[lower_id]
+        upper = self.objects[upper_id]
+        if self.body.holding == upper_id:
+            self.body.holding = None
+
+        prev_pos = upper.position
+        target_level = f"on_top_of:{lower_id}"
+        updated = upper.model_copy(
+            update={
+                "position": lower.position.model_copy(),
+                "level": target_level,
+                "velocity": Velocity(x=0.0, y=0.0),
+            }
+        )
+        self.objects[upper_id] = updated
+        if prev_pos != lower.position:
+            self.events.emit(
+                ObjectMovedEvent(
+                    tick=self.tick,
+                    source=source,
+                    object_id=upper_id,
+                    previous_position=prev_pos,
+                    position=lower.position,
+                )
+            )
+        self.events.emit(
+            ObjectChangedEvent(
+                tick=self.tick,
+                source=source,
+                object_id=upper_id,
+                changes={"level": target_level},
+                object=updated.model_dump(mode="json"),
+            )
+        )
+        if not is_stack_stable(updated, lower):
+            self._topple_object(upper_id, support=lower, move_dx=0.0, move_dy=0.0, source=source)
+            self.resolve_collisions()
+        return self.objects[upper_id]
+
+    def is_occluded(
+        self,
+        viewer_pos: Any,
+        target: Any,
+        *,
+        tolerance: float = DEFAULT_OCCLUSION_TOLERANCE,
+    ) -> bool:
+        """Return True when a taller object lies close to the line between ``viewer_pos`` and ``target``."""
+        _set_active_world(self)
+        return _is_occluded_helper(
+            viewer_pos,
+            target,
+            self.objects,
+            tolerance=tolerance,
+            world=self,
+        )
+
+    def object_top_height(self, object_id: str) -> float:
+        """Return the top elevation (base elevation + height) of ``object_id``."""
+        if object_id not in self.objects:
+            raise KeyError(f"unknown object id: {object_id}")
+        return object_top_height(self.objects[object_id], self.objects, self.terrain)
+
+    def _topple_object(
+        self,
+        upper_id: str,
+        *,
+        support: WorldObject,
+        move_dx: float,
+        move_dy: float,
+        source: str = "world",
+        _visited: set[str] | None = None,
+    ) -> None:
+        """Topple ``upper_id`` (and anything stacked on it) off ``support`` onto the plane."""
+        if _visited is None:
+            _visited = set()
+        if upper_id in _visited or upper_id not in self.objects:
+            return
+        _visited.add(upper_id)
+
+        upper = self.objects[upper_id]
+        prev_pos = upper.position
+
+        # Determine fall direction (opposite to support movement or deterministic from IDs)
+        move_len = math.hypot(move_dx, move_dy)
+        if move_len > 1e-9:
+            dir_x = -move_dx / move_len
+            dir_y = -move_dy / move_len
+        else:
+            id_u = int(upper.id.removeprefix("object_"))
+            id_s = int(support.id.removeprefix("object_"))
+            angle = ((id_u * 37 + id_s * 23) % 360) * (math.pi / 180.0)
+            dir_x = math.cos(angle)
+            dir_y = math.sin(angle)
+
+        sep_dist = support.radius + upper.radius + 0.05
+        candidate_pos = Position(
+            x=support.position.x + dir_x * sep_dist,
+            y=support.position.y + dir_y * sep_dist,
+        )
+        landing_level = "raised" if self.terrain.is_ledge(candidate_pos) else "ground"
+
+        updated = upper.model_copy(
+            update={
+                "position": candidate_pos,
+                "level": landing_level,
+                "velocity": Velocity(x=0.0, y=0.0),
+            }
+        )
+        self.objects[upper_id] = updated
+
+        if prev_pos != candidate_pos:
+            self.events.emit(
+                ObjectMovedEvent(
+                    tick=self.tick,
+                    source=source,
+                    object_id=upper_id,
+                    previous_position=prev_pos,
+                    position=candidate_pos,
+                )
+            )
+        if upper.level != landing_level:
+            self.events.emit(
+                ObjectChangedEvent(
+                    tick=self.tick,
+                    source=source,
+                    object_id=upper_id,
+                    changes={"level": landing_level},
+                    object=updated.model_dump(mode="json"),
+                )
+            )
+
+        # Cascade topple to anything stacked on top of upper_id
+        for child_id in sorted(self.objects):
+            child = self.objects.get(child_id)
+            if child is not None and child.level == f"on_top_of:{upper_id}":
+                self._topple_object(
+                    child_id,
+                    support=updated,
+                    move_dx=move_dx,
+                    move_dy=move_dy,
+                    source=source,
+                    _visited=_visited,
+                )
+
+    def _propagate_support_movement(
+        self,
+        lower_id: str,
+        *,
+        previous_pos: Position,
+        new_pos: Position,
+        source: str = "world",
+        _visited: set[str] | None = None,
+    ) -> bool:
+        """Carry or topple objects resting ``on_top_of`` ``lower_id``. Returns True if any toppled."""
+        if _visited is None:
+            _visited = set()
+        if lower_id in _visited or lower_id not in self.objects:
+            return False
+        _visited.add(lower_id)
+
+        lower = self.objects[lower_id]
+        dx = new_pos.x - previous_pos.x
+        dy = new_pos.y - previous_pos.y
+        step_dist = math.hypot(dx, dy)
+        any_toppled = False
+
+        for upper_id in sorted(self.objects):
+            upper = self.objects.get(upper_id)
+            if upper is None or upper.level != f"on_top_of:{lower_id}":
+                continue
+
+            if is_stack_stable(upper, lower) and step_dist <= max_carry_step(upper, lower):
+                prev_upper_pos = upper.position
+                carried_pos = Position(x=lower.position.x, y=lower.position.y)
+                if prev_upper_pos != carried_pos:
+                    updated_upper = upper.model_copy(update={"position": carried_pos})
+                    self.objects[upper_id] = updated_upper
+                    self.events.emit(
+                        ObjectMovedEvent(
+                            tick=self.tick,
+                            source=source,
+                            object_id=upper_id,
+                            previous_position=prev_upper_pos,
+                            position=carried_pos,
+                        )
+                    )
+                if self._propagate_support_movement(
+                    upper_id,
+                    previous_pos=prev_upper_pos,
+                    new_pos=carried_pos,
+                    source=source,
+                    _visited=_visited,
+                ):
+                    any_toppled = True
+            else:
+                self._topple_object(
+                    upper_id,
+                    support=lower,
+                    move_dx=dx,
+                    move_dy=dy,
+                    source=source,
+                    _visited=_visited,
+                )
+                any_toppled = True
+
+        if self.body.level == f"on_top_of:{lower_id}":
+            self.body.position = lower.position.model_copy()
+
+        return any_toppled
+
+    def _active_layer_ids(self, level: str) -> list[str]:
+        """Return sorted object IDs participating in 2D collisions on ``level``."""
+        held = self.body.holding
+        return [
+            obj_id
+            for obj_id in sorted(self.objects)
+            if obj_id != held and self.objects[obj_id].level == level
+        ]
+
+    def _resolve_layer_collisions(
+        self,
+        layer_ids: list[str],
+        *,
+        apply_velocity_response: bool = True,
+        prevent_ledge_entry: set[str] | None = None,
+    ) -> None:
+        """Apply circle-circle velocity collision response and non-overlap projection for one level."""
+        n = len(layer_ids)
+        if n < 2:
+            return
+
+        if apply_velocity_response:
+            for i in range(n):
+                id_a = layer_ids[i]
+                for j in range(i + 1, n):
+                    id_b = layer_ids[j]
+                    a = self.objects[id_a]
+                    b = self.objects[id_b]
+                    if a.fixed and b.fixed:
+                        continue
+                    dx = b.position.x - a.position.x
+                    dy = b.position.y - a.position.y
+                    dist = math.hypot(dx, dy)
+                    min_dist = a.radius + b.radius
+                    if dist >= min_dist:
+                        continue
+
+                    if dist > 1e-9:
+                        nx, ny = dx / dist, dy / dist
+                    else:
+                        num_a = int(id_a.removeprefix("object_"))
+                        num_b = int(id_b.removeprefix("object_"))
+                        angle = ((num_a * 31 + num_b * 17) % 360) * (math.pi / 180.0)
+                        nx, ny = math.cos(angle), math.sin(angle)
+
+                    rvx = a.velocity.x - b.velocity.x
+                    rvy = a.velocity.y - b.velocity.y
+                    vel_along_normal = rvx * nx + rvy * ny
+                    if vel_along_normal <= 0.0:
+                        continue
+
+                    if a.fixed:
+                        imp = (1.0 + COLLISION_RESTITUTION) * vel_along_normal
+                        new_vb = Velocity(
+                            x=b.velocity.x + imp * nx,
+                            y=b.velocity.y + imp * ny,
+                        )
+                        self.objects[id_b] = b.model_copy(update={"velocity": new_vb})
+                    elif b.fixed:
+                        imp = (1.0 + COLLISION_RESTITUTION) * vel_along_normal
+                        new_va = Velocity(
+                            x=a.velocity.x - imp * nx,
+                            y=a.velocity.y - imp * ny,
+                        )
+                        self.objects[id_a] = a.model_copy(update={"velocity": new_va})
+                    else:
+                        ma = max(0.05, a.weight)
+                        mb = max(0.05, b.weight)
+                        inv_ma = 1.0 / ma
+                        inv_mb = 1.0 / mb
+                        j_mag = (1.0 + COLLISION_RESTITUTION) * vel_along_normal / (inv_ma + inv_mb)
+                        new_va = Velocity(
+                            x=a.velocity.x - (j_mag * inv_ma) * nx,
+                            y=a.velocity.y - (j_mag * inv_ma) * ny,
+                        )
+                        new_vb = Velocity(
+                            x=b.velocity.x + (j_mag * inv_mb) * nx,
+                            y=b.velocity.y + (j_mag * inv_mb) * ny,
+                        )
+                        self.objects[id_a] = a.model_copy(update={"velocity": new_va})
+                        self.objects[id_b] = b.model_copy(update={"velocity": new_vb})
+
+        # Iterative positional projection
+        for _ in range(COLLISION_ITERATIONS):
+            any_overlap = False
+            for i in range(n):
+                id_a = layer_ids[i]
+                for j in range(i + 1, n):
+                    id_b = layer_ids[j]
+                    a = self.objects[id_a]
+                    b = self.objects[id_b]
+                    if a.fixed and b.fixed:
+                        continue
+                    dx = b.position.x - a.position.x
+                    dy = b.position.y - a.position.y
+                    dist = math.hypot(dx, dy)
+                    min_dist = a.radius + b.radius
+                    if dist >= min_dist - 1e-7:
+                        continue
+
+                    any_overlap = True
+                    if dist > 1e-9:
+                        nx, ny = dx / dist, dy / dist
+                    else:
+                        num_a = int(id_a.removeprefix("object_"))
+                        num_b = int(id_b.removeprefix("object_"))
+                        angle = ((num_a * 31 + num_b * 17) % 360) * (math.pi / 180.0)
+                        nx, ny = math.cos(angle), math.sin(angle)
+
+                    overlap = (min_dist + SEPARATION_SLOP) - dist
+                    if a.fixed:
+                        cand_b = Position(
+                            x=b.position.x + overlap * nx,
+                            y=b.position.y + overlap * ny,
+                        )
+                        if prevent_ledge_entry and id_b in prevent_ledge_entry and self.terrain.is_ledge(cand_b):
+                            cand_b = self._clamp_out_of_ledge(b.position, cand_b)
+                        self.objects[id_b] = b.model_copy(update={"position": cand_b})
+                    elif b.fixed:
+                        cand_a = Position(
+                            x=a.position.x - overlap * nx,
+                            y=a.position.y - overlap * ny,
+                        )
+                        if prevent_ledge_entry and id_a in prevent_ledge_entry and self.terrain.is_ledge(cand_a):
+                            cand_a = self._clamp_out_of_ledge(a.position, cand_a)
+                        self.objects[id_a] = a.model_copy(update={"position": cand_a})
+                    else:
+                        ma = max(0.05, a.weight)
+                        mb = max(0.05, b.weight)
+                        wa = mb / (ma + mb)
+                        wb = ma / (ma + mb)
+                        cand_a = Position(
+                            x=a.position.x - overlap * wa * nx,
+                            y=a.position.y - overlap * wa * ny,
+                        )
+                        cand_b = Position(
+                            x=b.position.x + overlap * wb * nx,
+                            y=b.position.y + overlap * wb * ny,
+                        )
+                        if prevent_ledge_entry and id_a in prevent_ledge_entry and self.terrain.is_ledge(cand_a):
+                            cand_a = self._clamp_out_of_ledge(a.position, cand_a)
+                        if prevent_ledge_entry and id_b in prevent_ledge_entry and self.terrain.is_ledge(cand_b):
+                            cand_b = self._clamp_out_of_ledge(b.position, cand_b)
+                        self.objects[id_a] = a.model_copy(update={"position": cand_a})
+                        self.objects[id_b] = b.model_copy(update={"position": cand_b})
+            if not any_overlap:
+                break
+
+        # Fallback de-wedging pass if any movable object is still squeezed into an overlap
+        for i in range(n):
+            id_a = layer_ids[i]
+            a = self.objects[id_a]
+            if a.fixed:
+                continue
+            has_overlap = False
+            for j in range(n):
+                if i == j:
+                    continue
+                b = self.objects[layer_ids[j]]
+                if math.hypot(a.position.x - b.position.x, a.position.y - b.position.y) < a.radius + b.radius - 1e-6:
+                    has_overlap = True
+                    break
+            if not has_overlap:
+                continue
+
+            base_x, base_y = a.position.x, a.position.y
+            placed = False
+            for ring in range(1, 80):
+                dist_step = ring * 0.05
+                for step_idx in range(16):
+                    angle = step_idx * (2.0 * math.pi / 16.0)
+                    cx = base_x + math.cos(angle) * dist_step
+                    cy = base_y + math.sin(angle) * dist_step
+                    cand = Position(x=cx, y=cy)
+                    if prevent_ledge_entry and id_a in prevent_ledge_entry and self.terrain.is_ledge(cand):
+                        continue
+                    clear = True
+                    for j in range(n):
+                        if i == j:
+                            continue
+                        b = self.objects[layer_ids[j]]
+                        if math.hypot(cx - b.position.x, cy - b.position.y) < a.radius + b.radius + SEPARATION_SLOP:
+                            clear = False
+                            break
+                    if clear:
+                        self.objects[id_a] = a.model_copy(update={"position": cand})
+                        placed = True
+                        break
+                if placed:
+                    break
+
+    def _clamp_out_of_ledge(self, safe_pos: Position, candidate_pos: Position) -> Position:
+        """Return a position that does not enter a ledge tile starting from ``safe_pos``."""
+        only_x = Position(x=candidate_pos.x, y=safe_pos.y)
+        only_y = Position(x=safe_pos.x, y=candidate_pos.y)
+        if not self.terrain.is_ledge(only_x):
+            return only_x
+        if not self.terrain.is_ledge(only_y):
+            return only_y
+        return safe_pos
+
+    def resolve_collisions(self) -> None:
+        """Resolve all circle overlaps on ``ground`` and ``raised`` levels."""
+        for level in ("ground", "raised"):
+            ids = self._active_layer_ids(level)
+            prevent = (
+                {oid for oid in ids if not self.terrain.is_ledge(self.objects[oid].position)}
+                if level == "ground"
+                else None
+            )
+            self._resolve_layer_collisions(
+                ids,
+                apply_velocity_response=False,
+                prevent_ledge_entry=prevent,
+            )
+
+    def _step_physics(self) -> None:
+        """Execute one deterministic tick of 2.5D physics."""
+        if not self.objects:
+            return
+
+        start_positions: dict[str, Position] = {
+            obj_id: obj.position for obj_id, obj in self.objects.items()
+        }
+
+        # 1. Check stacked objects (missing support, static instability, or impulse on upper object)
+        for obj_id in sorted(self.objects):
+            obj = self.objects.get(obj_id)
+            if obj is None or not obj.level.startswith("on_top_of:"):
+                continue
+            support_id = obj.level.removeprefix("on_top_of:")
+            support = self.objects.get(support_id)
+            if support is None:
+                landing_level = "raised" if self.terrain.is_ledge(obj.position) else "ground"
+                updated = obj.model_copy(update={"level": landing_level})
+                self.objects[obj_id] = updated
+                self.events.emit(
+                    ObjectChangedEvent(
+                        tick=self.tick,
+                        source="world",
+                        object_id=obj_id,
+                        changes={"level": landing_level},
+                        object=updated.model_dump(mode="json"),
+                    )
+                )
+            elif not is_stack_stable(obj, support) or obj.velocity.speed > 0.0:
+                self._topple_object(
+                    obj_id,
+                    support=support,
+                    move_dx=-obj.velocity.x,
+                    move_dy=-obj.velocity.y,
+                    source="world",
+                )
+
+        # 2. Apply terrain water effects (wetness, floating, downstream drift)
+        held = self.body.holding
+        for obj_id in sorted(self.objects):
+            if obj_id == held:
+                continue
+            obj = self.objects[obj_id]
+            if obj.level != "ground":
+                continue
+            tile = self.terrain.get_tile(obj.position)
+            if tile.type == "water":
+                floats = not obj.fixed and obj.weight <= WATER_FLOAT_MAX_WEIGHT
+                state_changed = False
+                new_state = dict(obj.state)
+                if new_state.get("wet") is not True:
+                    new_state["wet"] = True
+                    state_changed = True
+                if new_state.get("floating") != floats:
+                    new_state["floating"] = floats
+                    state_changed = True
+
+                new_vel = obj.velocity
+                if floats:
+                    drift_scale = WATER_DRIFT_STRENGTH / (1.0 + 0.5 * obj.weight)
+                    new_vel = Velocity(
+                        x=obj.velocity.x + tile.flow.x * drift_scale,
+                        y=obj.velocity.y + tile.flow.y * drift_scale,
+                    )
+                elif not obj.fixed and obj.velocity.speed > 0.0:
+                    new_vel = Velocity(
+                        x=obj.velocity.x * WATER_SINK_DRAG,
+                        y=obj.velocity.y * WATER_SINK_DRAG,
+                    )
+
+                if state_changed:
+                    updated = obj.model_copy(update={"state": new_state, "velocity": new_vel})
+                    self.objects[obj_id] = updated
+                    self.events.emit(
+                        ObjectChangedEvent(
+                            tick=self.tick,
+                            source="world",
+                            object_id=obj_id,
+                            changes={"state": new_state},
+                            object=updated.model_dump(mode="json"),
+                        )
+                    )
+                elif new_vel != obj.velocity:
+                    self.objects[obj_id] = obj.model_copy(update={"velocity": new_vel})
+
+        # 3. Substepped plane movement, ledge boundaries, and circle collisions
+        ground_ids = self._active_layer_ids("ground")
+        raised_ids = self._active_layer_ids("raised")
+        active_ids = ground_ids + raised_ids
+        non_ledge_ground_ids = {
+            oid for oid in ground_ids if not self.terrain.is_ledge(self.objects[oid].position)
+        }
+
+        max_speed = max(
+            (self.objects[oid].velocity.speed for oid in active_ids if not self.objects[oid].fixed),
+            default=0.0,
+        )
+
+        if max_speed > 0.0:
+            num_substeps = min(MAX_SUBSTEPS, max(1, math.ceil(max_speed / MAX_SUBSTEP_DISTANCE)))
+            dt_sub = 1.0 / num_substeps
+            for _ in range(num_substeps):
+                for oid in active_ids:
+                    obj = self.objects[oid]
+                    if obj.fixed or obj.velocity.speed == 0.0:
+                        continue
+                    old_pos = obj.position
+                    cand_x = old_pos.x + obj.velocity.x * dt_sub
+                    cand_y = old_pos.y + obj.velocity.y * dt_sub
+                    cand_pos = Position(x=cand_x, y=cand_y)
+                    vx, vy = obj.velocity.x, obj.velocity.y
+
+                    # Ground objects outside a ledge cannot move onto a ledge tile
+                    if oid in non_ledge_ground_ids and self.terrain.is_ledge(cand_pos):
+                        x_only = Position(x=cand_x, y=old_pos.y)
+                        y_only = Position(x=old_pos.x, y=cand_y)
+                        if self.terrain.is_ledge(x_only):
+                            cand_x = old_pos.x
+                            vx = -vx * COLLISION_RESTITUTION
+                        if self.terrain.is_ledge(y_only):
+                            cand_y = old_pos.y
+                            vy = -vy * COLLISION_RESTITUTION
+                        cand_pos = Position(x=cand_x, y=cand_y)
+                        if self.terrain.is_ledge(cand_pos):
+                            cand_pos = old_pos
+                            vx = -obj.velocity.x * COLLISION_RESTITUTION
+                            vy = -obj.velocity.y * COLLISION_RESTITUTION
+
+                    self.objects[oid] = obj.model_copy(
+                        update={
+                            "position": cand_pos,
+                            "velocity": Velocity(x=vx, y=vy),
+                        }
+                    )
+
+                self._resolve_layer_collisions(
+                    self._active_layer_ids("ground"),
+                    apply_velocity_response=True,
+                    prevent_ledge_entry=non_ledge_ground_ids,
+                )
+                self._resolve_layer_collisions(
+                    self._active_layer_ids("raised"),
+                    apply_velocity_response=True,
+                )
+        else:
+            # Even with zero velocity, ensure no objects overlap after a step
+            self._resolve_layer_collisions(
+                ground_ids,
+                apply_velocity_response=False,
+                prevent_ledge_entry=non_ledge_ground_ids,
+            )
+            self._resolve_layer_collisions(
+                raised_ids,
+                apply_velocity_response=False,
+            )
+
+        # 4. Raised objects that moved off a ledge drop to ground level
+        for oid in list(raised_ids):
+            obj = self.objects.get(oid)
+            if obj is not None and obj.level == "raised" and not self.terrain.is_ledge(obj.position):
+                updated = obj.model_copy(update={"level": "ground"})
+                self.objects[oid] = updated
+                self.events.emit(
+                    ObjectChangedEvent(
+                        tick=self.tick,
+                        source="world",
+                        object_id=oid,
+                        changes={"level": "ground"},
+                        object=updated.model_dump(mode="json"),
+                    )
+                )
+
+        # 5. Apply per-tick friction damping based on shape
+        for oid in active_ids:
+            obj = self.objects.get(oid)
+            if obj is None or obj.fixed or obj.velocity.speed == 0.0:
+                continue
+            retention = SHAPE_RETENTION.get(obj.shape, 0.60)
+            nvx = obj.velocity.x * retention
+            nvy = obj.velocity.y * retention
+            if math.hypot(nvx, nvy) < STOP_SPEED_EPSILON:
+                nvx, nvy = 0.0, 0.0
+            self.objects[oid] = obj.model_copy(update={"velocity": Velocity(x=nvx, y=nvy)})
+
+        # 6. Propagate carry or topple to objects stacked on top of moved supports
+        any_toppled = False
+        for oid in active_ids:
+            obj = self.objects.get(oid)
+            prev_pos = start_positions.get(oid)
+            if obj is None or prev_pos is None or obj.position == prev_pos:
+                continue
+            if self._propagate_support_movement(
+                oid,
+                previous_pos=prev_pos,
+                new_pos=obj.position,
+                source="world",
+            ):
+                any_toppled = True
+
+        if any_toppled:
+            self.resolve_collisions()
+
+        # 7. Emit ObjectMovedEvent for any active object whose position changed this tick
+        for oid in sorted(self.objects):
+            prev_pos = start_positions.get(oid)
+            obj = self.objects[oid]
+            if prev_pos is not None and obj.position != prev_pos and not obj.level.startswith("on_top_of:"):
+                self.events.emit(
+                    ObjectMovedEvent(
+                        tick=self.tick,
+                        source="world",
+                        object_id=oid,
+                        previous_position=prev_pos,
+                        position=obj.position,
+                    )
+                )
+
     def step(self) -> int:
         """Advance the simulation by exactly one tick."""
+        _set_active_world(self)
         self.tick += 1
         # Advance the simulation RNG once per tick so tick progression is
         # bound to the seeded generator and verified across save/restore.
         self.rng.random()
+        self._step_physics()
         self.events.emit(TickEvent(tick=self.tick, source="world"))
         return self.tick
 
     def snapshot(self) -> str:
-        """Serialize the full world state (including RNG and factory state) to JSON."""
+        """Serialize the full world state (including RNG, terrain, and factory state) to JSON."""
         version, internal_state, gauss_next = self.rng.getstate()
         payload = {
             "tick": self.tick,
@@ -470,6 +1272,7 @@ class World:
                 obj_id: self.objects[obj_id].model_dump(mode="json")
                 for obj_id in sorted(self.objects)
             },
+            "terrain": self.terrain.to_dict(),
             "factory": {
                 "next": self._factory._next,
                 "used": sorted(self._factory._used),
@@ -507,6 +1310,12 @@ class World:
                 raise ValueError(f"object key {obj_id!r} does not match object.id {obj.id!r}")
             restored_objects[obj.id] = obj
 
+        raw_terrain = raw.get("terrain")
+        if isinstance(raw_terrain, Mapping):
+            terrain = TerrainGrid.from_dict(raw_terrain)
+        else:
+            terrain = TerrainGrid()
+
         factory = ObjectFactory()
         raw_factory = raw.get("factory")
         if isinstance(raw_factory, Mapping):
@@ -533,7 +1342,9 @@ class World:
         self.tick = tick
         self.body = body
         self.objects = restored_objects
+        self.terrain = terrain
         self._factory = factory
+        _set_active_world(self)
         return self
 
     @classmethod
