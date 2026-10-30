@@ -1,0 +1,10 @@
+{
+  "goal": "look at the nearest round thing",
+  "steps": [
+    {"verb": "look", "target": "object_3", "params": {}}
+  ],
+  "wake_if": ["new object in range"],
+  "expect": "a closer description of the round thing",
+  "thought": "I have not looked at that one yet.",
+  "confidence": 0.4
+}

@@ -1,0 +1,15 @@
+{
+  "goal": "push object_7 toward the tree",
+  "steps": [
+    {
+      "verb": "move",
+      "target": null,
+      "params": {"direction": "toward object_7", "speed": 0.6}
+    },
+    {"verb": "push", "target": "object_7", "params": {"force": 0.5}}
+  ],
+  "wake_if": ["object_7 stops moving", "new object in range"],
+  "expect": "object_7 rolls toward the tree",
+  "thought": "A push should move the round thing.",
+  "confidence": 0.7
+}
