@@ -41,12 +41,18 @@ class LlmSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: str = "mock"
+    base_url: str = "http://127.0.0.1:11434/v1"
+    model: str = "qwen2.5:7b-instruct"
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    timeout_s: float = Field(default=30.0, gt=0.0)
+    max_retries: int = Field(default=2, ge=0)
 
-    @field_validator("backend")
+    @field_validator("backend", "base_url", "model")
     @classmethod
-    def backend_must_be_named(cls, value: str) -> str:
+    def string_must_be_non_empty(cls, value: str, info: object) -> str:
         if not value.strip():
-            raise ValueError("backend must be a non-empty string")
+            field_name = getattr(info, "field_name", "field")
+            raise ValueError(f"{field_name} must be a non-empty string")
         return value
 
 

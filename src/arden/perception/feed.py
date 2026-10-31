@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from arden.config import PerceptionSettings, Settings, load_config
 from arden.environment.daynight import coarse_light_level
 from arden.llm.schemas import VERBS
-from arden.world.objects import PERCEPTIBLE_STATE_KEYS, Position, WorldObject
+from arden.world.objects import Composite, PERCEPTIBLE_STATE_KEYS, Position, WorldObject
 from arden.world.physics import _get_active_world, _set_active_world
 from arden.world.world import AgentBody, World, WorldEvent
 
@@ -132,6 +132,12 @@ def _extract_object_affordances(
         _add("bind")
     if obj.hollow:
         _add("insert")
+    if (
+        isinstance(obj, Composite)
+        or bool(obj.state.get("made_by_agent"))
+        or bool(obj.state.get("contents"))
+    ):
+        _add("separate")
 
     # Affordances declared in behavior rules (opaque actions appear as action_<n>)
     next_opaque_idx = 1
