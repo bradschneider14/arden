@@ -26,13 +26,15 @@ COLLISION_RESTITUTION: float = 0.35
 COLLISION_ITERATIONS: int = 30
 SEPARATION_SLOP: float = 1e-6
 
-# Water and ledge constants.
+# Water, ledge, and agent body constants.
 DEFAULT_WATER_FLOW: tuple[float, float] = (1.0, 0.0)
 WATER_FLOAT_MAX_WEIGHT: float = 1.0
 WATER_DRIFT_STRENGTH: float = 0.25
 WATER_SINK_DRAG: float = 0.50
 LEDGE_HEIGHT: float = 1.0
-LEDGE_CLIMB_MIN_HEIGHT: float = 0.15
+DEFAULT_EYE_HEIGHT: float = 0.50
+AGENT_BODY_HEIGHT: float = 0.50
+LEDGE_CLIMB_MIN_HEIGHT: float = LEDGE_HEIGHT - AGENT_BODY_HEIGHT
 
 # Default proximity tolerance for approximate line-of-sight occlusion.
 DEFAULT_OCCLUSION_TOLERANCE: float = 0.5
@@ -425,7 +427,7 @@ class TerrainGrid:
             support = obj_map.get(support_id)
             if support is None:
                 return False
-            if support.height < LEDGE_CLIMB_MIN_HEIGHT:
+            if object_top_height(support, obj_map, self) + 1e-9 < LEDGE_CLIMB_MIN_HEIGHT:
                 return False
             tx, ty = extract_xy(target_pos)
             dist = math.hypot(support.position.x - tx, support.position.y - ty)
@@ -628,18 +630,48 @@ def object_top_height(
     return _object_elevation(obj, obj_map, terrain) + obj.height
 
 
+def _level_elevation(
+    level: str,
+    pos_xy: tuple[float, float],
+    objects_by_id: Mapping[str, WorldObject],
+    terrain: TerrainGrid | None = None,
+) -> float:
+    """Compute the base elevation of an entity at ``level`` and ``pos_xy``."""
+    if level == "raised":
+        return LEDGE_HEIGHT
+    if level == "ground":
+        if terrain is not None and terrain.is_ledge(pos_xy):
+            return LEDGE_HEIGHT
+        return 0.0
+    if level.startswith("on_top_of:"):
+        parent_id = level.removeprefix("on_top_of:")
+        parent = objects_by_id.get(parent_id)
+        if parent is None:
+            return 0.0
+        return object_top_height(parent, objects_by_id, terrain)
+    if level.startswith("inside:"):
+        parent_id = level.removeprefix("inside:")
+        parent = objects_by_id.get(parent_id)
+        if parent is None:
+            return 0.0
+        return _object_elevation(parent, objects_by_id, terrain)
+    return 0.0
+
+
 def is_occluded(
     viewer_or_world: Any,
     target_or_viewer: Any,
     obstacles_or_target: Any = None,
     *,
     tolerance: float = DEFAULT_OCCLUSION_TOLERANCE,
+    eye_height: float | None = None,
     world: World | None = None,
 ) -> bool:
     """Approximate line-of-sight occlusion helper.
 
     Returns ``True`` when a taller object lies close to the line segment between
-    ``viewer_pos`` and ``target``.
+    ``viewer_pos`` and ``target`` and exceeds both the target's top height and
+    the viewer's eye elevation (``base_elevation + eye_height``).
 
     Supports calling conventions:
     - ``is_occluded(viewer_pos, target)`` (uses active ``World``)
@@ -650,7 +682,12 @@ def is_occluded(
     from arden.world.world import World as WorldCls
 
     if isinstance(viewer_or_world, WorldCls):
-        return viewer_or_world.is_occluded(target_or_viewer, obstacles_or_target, tolerance=tolerance)
+        return viewer_or_world.is_occluded(
+            target_or_viewer,
+            obstacles_or_target,
+            tolerance=tolerance,
+            eye_height=eye_height,
+        )
 
     viewer_pos = viewer_or_world
     target = target_or_viewer
@@ -685,7 +722,19 @@ def is_occluded(
     terrain = resolved_world.terrain if resolved_world is not None else None
     held_id = resolved_world.body.holding if resolved_world is not None else None
 
-    # Resolve viewer coordinates and elevation
+    # Resolve viewer eye height above base elevation
+    if eye_height is not None:
+        resolved_eye_height = float(eye_height)
+    elif hasattr(viewer_pos, "eye_height") and isinstance(viewer_pos.eye_height, int | float):
+        resolved_eye_height = float(viewer_pos.eye_height)
+    elif isinstance(viewer_pos, Mapping) and isinstance(viewer_pos.get("eye_height"), int | float):
+        resolved_eye_height = float(viewer_pos["eye_height"])
+    elif resolved_world is not None:
+        resolved_eye_height = float(resolved_world.body.eye_height)
+    else:
+        resolved_eye_height = DEFAULT_EYE_HEIGHT
+
+    # Resolve viewer coordinates and eye elevation (base elevation + eye height)
     viewer_id: str | None = None
     viewer_elevation: float = 0.0
     if isinstance(viewer_pos, str):
@@ -694,18 +743,37 @@ def is_occluded(
         viewer_obj = obj_map[viewer_pos]
         viewer_id = viewer_obj.id
         vx, vy = viewer_obj.position.x, viewer_obj.position.y
-        viewer_elevation = _object_elevation(viewer_obj, obj_map, terrain)
+        base_elev = _object_elevation(viewer_obj, obj_map, terrain)
+        viewer_elevation = base_elev + (
+            resolved_eye_height if eye_height is not None else max(viewer_obj.height, resolved_eye_height)
+        )
     elif isinstance(viewer_pos, WorldObject):
         viewer_id = viewer_pos.id
         vx, vy = viewer_pos.position.x, viewer_pos.position.y
-        viewer_elevation = _object_elevation(viewer_pos, obj_map, terrain)
+        base_elev = _object_elevation(viewer_pos, obj_map, terrain)
+        viewer_elevation = base_elev + (
+            resolved_eye_height if eye_height is not None else max(viewer_pos.height, resolved_eye_height)
+        )
     else:
         vx, vy = extract_xy(viewer_pos)
+        viewer_level: str | None = None
         if hasattr(viewer_pos, "level") and isinstance(viewer_pos.level, str):
-            if viewer_pos.level == "raised":
-                viewer_elevation = LEDGE_HEIGHT
+            viewer_level = viewer_pos.level
+        elif isinstance(viewer_pos, Mapping) and isinstance(viewer_pos.get("level"), str):
+            viewer_level = str(viewer_pos["level"])
+        elif (
+            resolved_world is not None
+            and math.hypot(vx - resolved_world.body.position.x, vy - resolved_world.body.position.y) <= 1e-6
+        ):
+            viewer_level = resolved_world.body.level
+
+        if viewer_level is not None:
+            base_elev = _level_elevation(viewer_level, (vx, vy), obj_map, terrain)
         elif terrain is not None and terrain.is_ledge((vx, vy)):
-            viewer_elevation = LEDGE_HEIGHT
+            base_elev = LEDGE_HEIGHT
+        else:
+            base_elev = 0.0
+        viewer_elevation = base_elev + resolved_eye_height
 
     # Resolve target coordinates and top height
     target_id: str | None = None
@@ -752,7 +820,7 @@ def is_occluded(
                 continue
 
         cand_top = object_top_height(candidate, obj_map, terrain)
-        # Must be strictly taller than the target (and taller than viewer base elevation)
+        # Must be strictly taller than the target (and taller than viewer eye elevation)
         if cand_top <= target_height or cand_top <= viewer_elevation:
             continue
 

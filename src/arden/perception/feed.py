@@ -253,6 +253,9 @@ class PerceivedObject(BaseModel):
 
     def to_text(self, *, detailed: bool = False) -> str:
         """Render a compact, deterministic text line for this object."""
+        # TODO(perception-qualitative): Convert raw float object measurements
+        # (distance, height, volume, weight) into qualitative or ranged
+        # descriptions in a follow-up perception ticket (see docs/decisions.md, #36).
         parts = [
             f"{self.id}",
             f"dist={_fmt_num(self.distance)}",

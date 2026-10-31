@@ -585,7 +585,7 @@ def look(
 
     if (
         resolved_world.body.holding != target_obj.id
-        and is_occluded(resolved_world.body.position, target_obj, world=resolved_world)
+        and is_occluded(resolved_world.body, target_obj, world=resolved_world)
     ):
         return ActionResult(ok=False, reason=OUT_OF_REACH)
 

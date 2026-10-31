@@ -9,6 +9,10 @@ from typing import Any
 import pytest
 
 from arden.world import (
+    DEFAULT_EYE_HEIGHT,
+    LEDGE_CLIMB_MIN_HEIGHT,
+    LEDGE_HEIGHT,
+    AgentBody,
     Position,
     TerrainGrid,
     Velocity,
@@ -194,6 +198,44 @@ def test_terrain_ledge_reachability_by_climbing_or_adjacent_raised_tile() -> Non
         assert not world.terrain.is_ledge(world.objects[ball.id].position)
 
 
+def test_ledge_climbing_blocks_low_support_and_allows_tall_or_stacked_support() -> None:
+    assert LEDGE_HEIGHT == 1.0
+    assert LEDGE_CLIMB_MIN_HEIGHT == 0.5
+
+    terrain = TerrainGrid()
+    terrain.set_tile(2, 0, "ledge")
+    world = World(seed=55, terrain=terrain, body={"position": {"x": 1.5, "y": 0.5}})
+
+    # Blocked case: standing on an adjacent low stone (height 0.2 < 0.5, and even 0.15)
+    # is not tall enough to climb onto the 1.0m ledge.
+    low_stone = world.spawn(
+        {**_BASE_PROPS, "shape": "flat", "height": 0.2, "volume": 0.06, "weight": 2.0, "rigidity": 0.9},
+        {"x": 1.6, "y": 0.5},
+    )
+    assert world.climb_onto(low_stone.id) is True
+    assert world.body.level == f"on_top_of:{low_stone.id}"
+    assert world.can_reach((2.5, 0.5)) is False
+    assert world.move_agent((2.5, 0.5)) is False
+    assert world.body.level == f"on_top_of:{low_stone.id}"
+
+    # Allowed case via stacking: stack a second stone (height 0.35) on top of low_stone
+    # so the combined top height is 0.55 >= 0.5 (within one body height of the 1.0m ledge).
+    second_stone = world.spawn(
+        {**_BASE_PROPS, "shape": "flat", "height": 0.35, "volume": 0.04, "weight": 1.5, "rigidity": 0.9},
+        {"x": 1.2, "y": 0.5},
+    )
+    stacked = world.stack(second_stone.id, low_stone.id)
+    assert stacked.level == f"on_top_of:{low_stone.id}"
+    assert world.object_top_height(second_stone.id) == pytest.approx(0.55)
+
+    assert world.climb_onto(second_stone.id) is True
+    assert world.body.level == f"on_top_of:{second_stone.id}"
+    assert world.can_reach((2.5, 0.5)) is True
+    assert world.move_agent((2.5, 0.5)) is True
+    assert world.body.level == "raised"
+    assert world.body.position == Position(x=2.5, y=0.5)
+
+
 def test_circle_collision_with_movable_and_fixed_objects() -> None:
     world = World(seed=6)
     cue = world.spawn({**_BASE_PROPS, "shape": "sphere", "weight": 0.5}, {"x": 0.0, "y": 0.0})
@@ -301,6 +343,39 @@ def test_is_occluded_detects_taller_object_near_line_of_sight() -> None:
     )
     assert short_pebble.height < small_target.height
     assert world.is_occluded(viewer, small_target) is False
+
+
+def test_is_occluded_uses_agent_eye_height_so_low_pebble_does_not_hide_flat_object() -> None:
+    world = World(seed=88, body={"position": {"x": 0.0, "y": 0.0}})
+    assert world.body.eye_height == DEFAULT_EYE_HEIGHT == 0.5
+
+    # Flat object on the ground (height 0.02) behind a low pebble (height 0.08).
+    # Even though the pebble (0.08) is taller than the flat object (0.02),
+    # the agent's eyes at eye_height (0.5) look over the pebble, so it is not occluded.
+    flat_leaf = world.spawn(
+        {**_BASE_PROPS, "shape": "flat", "height": 0.02, "volume": 0.001, "weight": 0.05},
+        {"x": 4.0, "y": 0.0},
+    )
+    low_pebble = world.spawn(
+        {**_BASE_PROPS, "shape": "sphere", "height": 0.08, "volume": 0.002, "weight": 0.1},
+        {"x": 2.0, "y": 0.0},
+    )
+    assert low_pebble.height > flat_leaf.height
+    assert low_pebble.height < world.body.eye_height
+    assert world.is_occluded(world.body, flat_leaf) is False
+    assert is_occluded(world.body, flat_leaf) is False
+
+    # Configurable eye_height: a boulder of height 0.8 occludes flat_leaf for the default
+    # eye_height (0.5), but not when the agent body is configured with eye_height=1.0.
+    boulder = world.spawn(
+        {**_BASE_PROPS, "shape": "cube", "height": 0.8, "volume": 0.2, "weight": 10.0},
+        {"x": 2.0, "y": 0.0},
+    )
+    assert boulder.height > world.body.eye_height
+    assert world.is_occluded(world.body, flat_leaf) is True
+
+    tall_body = AgentBody(position=Position(x=0.0, y=0.0), eye_height=1.0)
+    assert world.is_occluded(tall_body, flat_leaf) is False
 
 
 def test_creator_move_and_despawn_carry_or_topple_stacked_objects() -> None:
