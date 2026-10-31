@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from arden.config import Settings, load_config
+from arden.config import Settings, load_config, make_rng
 from arden.llm import (
     VERBS,
     Intent,
@@ -16,6 +16,7 @@ from arden.llm import (
     LLMOutputError,
     MockLLM,
     Step,
+    derive_llm_seed,
     make_backend,
 )
 from arden.llm.mock import FIXTURES_DIR
@@ -120,6 +121,24 @@ def test_make_backend_uses_config_and_rejects_unknown_names() -> None:
 
     with pytest.raises(ValueError, match="ollama"):
         make_backend(Settings.model_validate({"llm": {"backend": "ollama"}}))
+
+
+def test_make_backend_derives_distinct_seed_from_world_seed() -> None:
+    settings = Settings(world={"seed": 42})
+    world_rng = make_rng(settings)
+    backend = make_backend(settings)
+    assert isinstance(backend, MockLLM)
+    assert backend.seed == derive_llm_seed(42) == 43
+    assert backend.seed != settings.world.seed
+    assert backend._rng.getstate() != world_rng.getstate()
+    assert [backend._rng.random() for _ in range(8)] != [world_rng.random() for _ in range(8)]
+
+    # Determinism still holds across two runs with the same world seed
+    backend_a = make_backend(settings)
+    backend_b = make_backend(settings)
+    assert isinstance(backend_a, MockLLM)
+    assert isinstance(backend_b, MockLLM)
+    assert _calls(backend_a, 10) == _calls(backend_b, 10)
 
 
 def test_unknown_role_does_not_consume_the_queue() -> None:

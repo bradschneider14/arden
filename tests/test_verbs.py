@@ -92,7 +92,7 @@ def test_look_verb_returns_perceptible_properties_and_fails_when_out_of_reach() 
         {
             **_BASE_PROPS,
             "color": "blue",
-            "behavior": [{"verb": "push", "scale": 4}, {"verb": "look", "state": {"inspected": True}}],
+            "behavior": [{"verb": "push", "scale": 4}, {"verb": "look", "state": {"wet": True, "inspected": True}}],
         },
         {"x": 1.0, "y": 0.0},
     )
@@ -103,7 +103,8 @@ def test_look_verb_returns_perceptible_properties_and_fails_when_out_of_reach() 
     assert res_near.reason is None
     assert res_near.data["id"] == near.id
     assert res_near.data["color"] == "blue"
-    assert res_near.data["state"]["inspected"] is True
+    assert res_near.data["state"] == {"wet": True}
+    assert world.objects[near.id].state["inspected"] is True
     assert "behavior" not in res_near.data
     assert any(isinstance(e, ObjectChangedEvent) for e in res_near.events)
 

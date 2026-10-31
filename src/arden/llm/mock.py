@@ -10,6 +10,12 @@ from pathlib import Path
 from arden.llm.base import parse_json_output, require_role
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+LLM_SEED_OFFSET: int = 1
+
+
+def derive_llm_seed(world_seed: int) -> int:
+    """Derive a distinct deterministic seed for ``MockLLM`` from ``world_seed``."""
+    return world_seed + LLM_SEED_OFFSET
 
 
 class MockLLM:
@@ -31,10 +37,11 @@ class MockLLM:
 
     def __init__(
         self,
-        seed: int = 0,
+        seed: int = LLM_SEED_OFFSET,
         script: Sequence[str] | None = None,
         fixtures_dir: Path | None = None,
     ) -> None:
+        self.seed = seed
         self._rng = random.Random(seed)
         self._queue: deque[str] = deque(script or ())
         directory = FIXTURES_DIR if fixtures_dir is None else Path(fixtures_dir)

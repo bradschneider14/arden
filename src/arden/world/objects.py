@@ -259,6 +259,9 @@ class WorldObject(BaseModel):
         Only allowlisted keys in ``state`` are included.
         The id is the referent (``object_7``), not a name derived from it.
         """
+        # TODO(perception-qualitative): Raw floats for height, volume, and weight
+        # stay for now; a follow-up perception ticket must convert them into
+        # qualitative or ranged descriptions (see docs/decisions.md, #36).
         data = self.model_dump(mode="json", exclude=set(_HIDDEN_OBJECT_FIELDS))
         if data.get("color") is None:
             del data["color"]
