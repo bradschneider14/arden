@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from arden.world.objects import Position, Velocity, WorldObject, object_radius
+from arden.world.objects import (
+    Position,
+    Velocity,
+    WorldObject,
+    object_radius,
+    validate_world_object,
+)
 
 if TYPE_CHECKING:
     from arden.world.world import AgentBody, World
@@ -25,6 +31,7 @@ MAX_SUBSTEPS: int = 16
 COLLISION_RESTITUTION: float = 0.35
 COLLISION_ITERATIONS: int = 30
 SEPARATION_SLOP: float = 1e-6
+STACK_STABILITY_THRESHOLD: float = 0.50
 
 # Water and ledge constants.
 DEFAULT_WATER_FLOW: tuple[float, float] = (1.0, 0.0)
@@ -390,13 +397,7 @@ class TerrainGrid:
         from_level: str = "ground",
         objects: Mapping[str, WorldObject] | Iterable[WorldObject] | None = None,
     ) -> bool:
-        """Return True if ``target_pos`` is reachable from ``from_pos`` and ``from_level``.
-
-        A ``ledge`` tile (raised level) is reachable only when:
-        - Already at ``raised`` level (e.g. on an adjacent raised/ledge tile), or
-        - Climbing from ``on_top_of:object_<n>`` where the supporting object has
-          sufficient height and lies adjacent to the ledge.
-        """
+        """Return True if ``target_pos`` is reachable from ``from_pos`` and ``from_level``."""
         dest_tile = self.get_tile(target_pos)
         if dest_tile.type != "ledge":
             return True
@@ -405,10 +406,10 @@ class TerrainGrid:
         if from_level == "raised":
             if from_pos is None:
                 return True
-            OriginCell = self.world_to_cell(from_pos)
-            TargetCell = self.world_to_cell(target_pos)
+            origin_cell = self.world_to_cell(from_pos)
+            target_cell = self.world_to_cell(target_pos)
             # Reachable from the same ledge or an adjacent raised tile.
-            if max(abs(OriginCell[0] - TargetCell[0]), abs(OriginCell[1] - TargetCell[1])) <= 1:
+            if max(abs(origin_cell[0] - target_cell[0]), abs(origin_cell[1] - target_cell[1])) <= 1:
                 if self.get_tile(from_pos).type == "ledge" or from_level == "raised":
                     return True
             return self.get_tile(from_pos).type == "ledge"
@@ -466,19 +467,155 @@ def objects_overlap(a: WorldObject, b: WorldObject, *, tolerance: float = 1e-5) 
     return dist < (object_radius(a) + object_radius(b) - tolerance)
 
 
-def is_stack_stable(upper: WorldObject, lower: WorldObject) -> bool:
-    """Return True if ``upper`` can stably rest ``on_top_of`` ``lower`` at rest."""
+def _pair_stability_score(upper: WorldObject, lower: WorldObject) -> float:
+    """Compute the pairwise stability score in ``[0, 1]`` for ``upper`` on ``lower``."""
     if upper.id == lower.id:
-        return False
-    if SHAPE_STABILITY.get(lower.shape, 0.0) <= 0.0:
-        return False
+        return 0.0
+    base_shape = SHAPE_STABILITY.get(lower.shape, 0.0)
+    if base_shape <= 0.0:
+        return 0.0
     if upper.radius > lower.radius * 1.5 + 1e-6:
-        return False
+        return 0.0
     if not lower.fixed and upper.weight > max(0.05, lower.weight) * 2.0:
-        return False
+        return 0.0
     if lower.rigidity < 0.2 and upper.weight > lower.weight:
-        return False
-    return True
+        return 0.0
+
+    size_ratio = upper.radius / max(0.01, lower.radius)
+    size_factor = 1.0 if size_ratio <= 1.0 else max(0.55, 1.0 - 0.8 * (size_ratio - 1.0))
+
+    if lower.fixed:
+        weight_factor = 1.0
+    else:
+        weight_ratio = upper.weight / max(0.05, lower.weight)
+        weight_factor = 1.0 if weight_ratio <= 1.0 else max(0.60, 1.0 - 0.35 * (weight_ratio - 1.0))
+
+    upper_shape_factor = (
+        0.85 if upper.shape == "sphere" else (0.95 if upper.shape == "cylinder" else 1.0)
+    )
+    score = base_shape * size_factor * weight_factor * upper_shape_factor
+    return min(1.0, max(0.0, score))
+
+
+def stack_stability_score(
+    upper: WorldObject,
+    lower: WorldObject,
+    objects_by_id: Mapping[str, WorldObject] | None = None,
+) -> float:
+    """Compute a deterministic stability score in ``[0, 1]`` from size, shape, and weight.
+
+    Scores ``>= STACK_STABILITY_THRESHOLD`` (``0.5``) are stable; scores below
+    ``0.5`` topple.
+    """
+    direct_score = _pair_stability_score(upper, lower)
+    if direct_score <= 0.0:
+        return 0.0
+
+    obj_map: Mapping[str, WorldObject] | None = objects_by_id
+    if obj_map is None and lower.level.startswith("on_top_of:"):
+        active = _get_active_world()
+        if active is not None:
+            obj_map = active.objects
+
+    if not obj_map or not lower.level.startswith("on_top_of:"):
+        return round(direct_score, 6)
+
+    # Walk down the support chain: [base, ..., lower, upper]
+    chain: list[WorldObject] = [upper, lower]
+    visited: set[str] = {upper.id, lower.id}
+    curr = lower
+    while curr.level.startswith("on_top_of:"):
+        parent_id = curr.level.removeprefix("on_top_of:")
+        if parent_id in visited:
+            return 0.0
+        parent = obj_map.get(parent_id)
+        if parent is None:
+            break
+        visited.add(parent_id)
+        chain.append(parent)
+        curr = parent
+
+    chain.reverse()  # [base, ..., lower, upper]
+    min_pair = direct_score
+    n = len(chain)
+    for idx in range(n - 1):
+        sup = chain[idx]
+        top = chain[idx + 1]
+        p_score = _pair_stability_score(top, sup)
+        if p_score < STACK_STABILITY_THRESHOLD:
+            return 0.0
+        min_pair = min(min_pair, p_score)
+
+        # Cumulative weight above `sup`
+        above_weight = sum(o.weight for o in chain[idx + 1 :])
+        if sup.rigidity < 0.2 and above_weight > sup.weight:
+            return 0.0
+        if not sup.fixed and sup.shape != "flat" and above_weight > max(0.05, sup.weight) * 3.5:
+            return 0.0
+
+    depth = n - 1  # number of stacked joints
+    base = chain[0]
+    if all(o.shape == "flat" for o in chain[:-1]):
+        depth_factor = 0.96 ** max(0, depth - 1)
+    else:
+        base_stab = SHAPE_STABILITY.get(base.shape, 0.5)
+        depth_factor = (0.88 * base_stab) ** max(0, depth - 1)
+
+    return round(min(1.0, max(0.0, min_pair * depth_factor)), 6)
+
+
+stability_score = stack_stability_score
+compute_stack_stability = stack_stability_score
+
+
+def is_stack_stable(
+    upper_or_world: Any,
+    lower_or_id: Any = None,
+    objects_by_id: Mapping[str, WorldObject] | None = None,
+    *,
+    world: World | None = None,
+) -> bool:
+    """Return True if ``upper`` can stably rest ``on_top_of`` ``lower`` at rest.
+
+    Supports ``is_stack_stable(upper, lower, objects_by_id=...)``,
+    ``is_stack_stable(world, object_id)``, and ``is_stack_stable(object_id, world=world)``.
+    """
+    if hasattr(upper_or_world, "objects"):
+        target_world = upper_or_world
+        upper_ref = lower_or_id
+        lower_ref = None
+    elif lower_or_id is None:
+        target_world = world if world is not None else _get_active_world()
+        if target_world is None:
+            raise TypeError("is_stack_stable requires (upper, lower) or an active/provided World")
+        upper_ref = upper_or_world
+        lower_ref = None
+    else:
+        target_world = world
+        upper_ref = upper_or_world
+        lower_ref = lower_or_id
+
+    if lower_ref is None and target_world is not None:
+        upper_obj = (
+            target_world.objects.get(upper_ref)
+            if isinstance(upper_ref, str)
+            else upper_ref
+        )
+        if upper_obj is None:
+            return False
+        if not upper_obj.level.startswith("on_top_of:"):
+            return True
+        support_id = upper_obj.level.removeprefix("on_top_of:")
+        lower_obj = target_world.objects.get(support_id)
+        if lower_obj is None:
+            return False
+        return (
+            stack_stability_score(upper_obj, lower_obj, target_world.objects)
+            >= STACK_STABILITY_THRESHOLD
+        )
+
+    obj_map = objects_by_id if objects_by_id is not None else (target_world.objects if target_world is not None else None)
+    return stack_stability_score(upper_ref, lower_ref, obj_map) >= STACK_STABILITY_THRESHOLD
 
 
 def max_carry_step(upper: WorldObject, lower: WorldObject) -> float:
@@ -492,6 +629,28 @@ def max_carry_step(upper: WorldObject, lower: WorldObject) -> float:
     else:
         weight_factor = min(1.0, max(0.1, lower.weight) / max(0.1, upper.weight))
     return base_stability * upper_shape_factor * weight_factor * 1.5
+
+
+def strike_impact_multiplier(tool: WorldObject | None) -> float:
+    """Compute the strike force multiplier from a held tool or ``Composite``.
+
+    Derived from the tool's ``weight``, ``length``/``height``, ``rigidity``, and
+    ``center_of_mass`` so that a stick bound to a heavy stone hits harder than
+    the stick alone.
+    """
+    if tool is None:
+        return 1.0
+    weight_term = 0.5 * max(0.0, tool.weight)
+    length_term = 0.4 * max(0.0, tool.length)
+    rigidity_factor = 0.7 + 0.3 * max(0.0, min(1.0, tool.rigidity))
+    com_val = float(tool.center_of_mass)
+    com_bonus = 1.0 + 0.3 * max(0.0, com_val - 0.5)
+    return round((1.0 + weight_term + length_term) * rigidity_factor * com_bonus, 6)
+
+
+def compute_strike_force(base_force: float, tool: WorldObject | None = None) -> float:
+    """Compute the effective impact force when striking with ``base_force`` and optional ``tool``."""
+    return round(float(base_force) * strike_impact_multiplier(tool), 6)
 
 
 def compute_impulse_delta(
@@ -670,14 +829,14 @@ def is_occluded(
             if isinstance(v, WorldObject):
                 obj_map[v.id] = v
             elif isinstance(v, Mapping):
-                parsed = WorldObject.model_validate(v)
+                parsed = validate_world_object(v)
                 obj_map[parsed.id] = parsed
     elif isinstance(obstacles, Iterable) and not isinstance(obstacles, str | bytes):
         for item in obstacles:
             if isinstance(item, WorldObject):
                 obj_map[item.id] = item
             elif isinstance(item, Mapping):
-                parsed = WorldObject.model_validate(item)
+                parsed = validate_world_object(item)
                 obj_map[parsed.id] = parsed
     elif resolved_world is not None:
         obj_map = dict(resolved_world.objects)
