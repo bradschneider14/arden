@@ -550,6 +550,40 @@ def apply_impulse(
     return world_or_id.apply_impulse(str(id_or_direction), direction_or_force, float(force))
 
 
+def should_break_on_strike(obj: WorldObject, force: float) -> bool:
+    """Return True if striking ``obj`` with ``force`` causes it to break."""
+    if isinstance(force, bool) or not isinstance(force, int | float):
+        raise TypeError("force must be a number")
+    force_val = float(force)
+    if not math.isfinite(force_val) or force_val < 0.0:
+        raise ValueError("force must be a finite non-negative number")
+    if force_val <= 0.0:
+        return False
+
+    break_rules = [
+        rule
+        for rule in obj.behavior
+        if rule.verb == "strike" and (rule.__pydantic_extra__ or {}).get("response") == "break"
+    ]
+    if break_rules:
+        for rule in break_rules:
+            extras = rule.__pydantic_extra__ or {}
+            threshold = extras.get("above_force")
+            if isinstance(threshold, int | float) and not isinstance(threshold, bool):
+                if force_val >= float(threshold):
+                    return True
+            else:
+                return True
+        return False
+
+    return bool(obj.fragile)
+
+
+def can_bind(binder: WorldObject) -> bool:
+    """Return True if ``binder`` can tie or stick objects together."""
+    return bool(binder.binding) and not bool(binder.state.get("broken", False))
+
+
 def _object_elevation(
     obj: WorldObject,
     objects_by_id: Mapping[str, WorldObject],
