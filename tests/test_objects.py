@@ -12,6 +12,7 @@ from arden.world.objects import (
     PERCEPTIBLE_STATE_KEYS,
     BehaviorRule,
     ObjectFactory,
+    Position,
     WorldObject,
 )
 from arden.world import World, can_bind, is_stack_stable, should_break_on_strike

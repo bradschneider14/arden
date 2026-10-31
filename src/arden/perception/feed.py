@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer
 
 from arden.config import PerceptionSettings, Settings, load_config
+from arden.environment.daynight import coarse_light_level
 from arden.llm.schemas import VERBS
 from arden.world.objects import PERCEPTIBLE_STATE_KEYS, Position, WorldObject
 from arden.world.physics import _get_active_world, _set_active_world
@@ -366,6 +367,7 @@ class Percept(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tick: int = Field(default=0, ge=0)
+    light: float = Field(default=1.0, ge=0.0, le=1.0)
     body: BodyPercept
     objects: list[PerceivedObject] = Field(default_factory=list)
     events: list[PerceivedEvent] = Field(default_factory=list)
@@ -396,6 +398,11 @@ class Percept(BaseModel):
         return self.body
 
     @property
+    def light_level(self) -> float:
+        """Coarse light level in ``[0.0, 1.0]`` with no labels (alias for ``light``)."""
+        return self.light
+
+    @property
     def is_empty(self) -> bool:
         """Return True when this is a delta percept with no changes since the last call."""
         if self.is_delta:
@@ -418,6 +425,7 @@ class Percept(BaseModel):
         """Serialize the percept to a JSON-ready dictionary."""
         result: dict[str, Any] = {
             "tick": self.tick,
+            "light": self.light,
             "body": self.body.to_dict(),
             "objects": [obj.to_dict() for obj in self.objects],
             "events": [ev.to_dict() for ev in self.events],
@@ -443,6 +451,7 @@ class Percept(BaseModel):
         held_str = self.body.holding if self.body.holding is not None else "none"
         lines: list[str] = [
             f"tick: {self.tick}",
+            f"light: {_fmt_num(self.light)}",
             (
                 f"body: pos={_fmt_pos(self.body.position)} "
                 f"level={self.body.level} "
@@ -719,7 +728,7 @@ def perceive(
     world: World,
     body: AgentBody | Mapping[str, Any] | None = None,
     *,
-    visibility_factor: float = 1.0,
+    visibility_factor: float | None = None,
     sensing_radius: float | None = None,
     reach_radius: float | None = None,
     color_visibility_threshold: float | None = None,
@@ -731,14 +740,18 @@ def perceive(
     - Nearby objects within ``sensing_radius * visibility_factor`` that are not
       occluded are included with perceptible properties, distance, and compass
       bearing.
+    - When ``visibility_factor`` is omitted, it is driven by ``world.visibility_factor``
+      from the continuous day/night cycle.
     - When ``visibility_factor`` is lowered, the effective sensing radius shrinks
       and fine detail such as ``color`` is dropped before coarse geometry.
-    - Body state is reported as plain numbers with no evaluative labels.
+    - Body state and light level are reported as plain numbers with no evaluative labels.
     - Affordances are included for perceived objects within ``reach_radius``,
       with opaque actions formatted as ``action_<n>`` with no description.
     """
     _set_active_world(world)
-    vf = _validate_visibility_factor(visibility_factor)
+    raw_vf = world.visibility_factor if visibility_factor is None else visibility_factor
+    vf = _validate_visibility_factor(raw_vf)
+    coarse_light = coarse_light_level(getattr(world, "light_level", 1.0))
 
     if body is None:
         agent_body = world.body
@@ -832,6 +845,7 @@ def perceive(
 
     return Percept(
         tick=world.tick,
+        light=coarse_light,
         body=body_percept,
         objects=perceived_objects,
         events=perceived_events,
@@ -918,7 +932,7 @@ class PerceptionTracker:
         reach_radius: float | None = None,
         move_threshold: float | None = None,
         color_visibility_threshold: float | None = None,
-        visibility_factor: float = 1.0,
+        visibility_factor: float | None = None,
     ) -> None:
         self.world = world
         self.config = config
@@ -926,11 +940,14 @@ class PerceptionTracker:
         self.reach_radius = reach_radius
         self.move_threshold = move_threshold
         self.color_visibility_threshold = color_visibility_threshold
-        self.visibility_factor = _validate_visibility_factor(visibility_factor)
+        self.visibility_factor: float | None = (
+            None if visibility_factor is None else _validate_visibility_factor(visibility_factor)
+        )
 
         self._initialized: bool = False
         self._known_objects: dict[str, PerceivedObject] = {}
         self._last_body: BodyPercept | None = None
+        self._last_light: float | None = None
         self._last_affordances: AffordanceMap = AffordanceMap()
 
     def _resolve_world(self, world: World | None) -> World:
@@ -954,8 +971,9 @@ class PerceptionTracker:
     ) -> Percept:
         """Return a complete (non-delta) ``Percept`` and update the tracker baseline."""
         w = self._resolve_world(world)
-        vf = self.visibility_factor if visibility_factor is None else _validate_visibility_factor(visibility_factor)
-        self.visibility_factor = vf
+        if visibility_factor is not None:
+            self.visibility_factor = _validate_visibility_factor(visibility_factor)
+        vf = self.visibility_factor
 
         full = perceive(
             w,
@@ -968,6 +986,7 @@ class PerceptionTracker:
         )
         self._known_objects = {obj.id: obj.model_copy(deep=True) for obj in full.objects}
         self._last_body = full.body.model_copy(deep=True)
+        self._last_light = full.light
         self._last_affordances = AffordanceMap({k: list(v) for k, v in full.affordances.items()})
         self._initialized = True
         return full
@@ -997,8 +1016,9 @@ class PerceptionTracker:
     ) -> Percept:
         """Compute only what appeared, disappeared, moved beyond threshold, or changed since the last call."""
         w = self._resolve_world(world)
-        vf = self.visibility_factor if visibility_factor is None else _validate_visibility_factor(visibility_factor)
-        self.visibility_factor = vf
+        if visibility_factor is not None:
+            self.visibility_factor = _validate_visibility_factor(visibility_factor)
+        vf = self.visibility_factor
 
         cfg = _resolve_perception_settings(
             self.config,
@@ -1131,22 +1151,30 @@ class PerceptionTracker:
         )
 
         body_changed = self._last_body != current.body
+        light_changed = self._last_light != current.light
         affordances_changed = self._last_affordances != current.affordances
         has_any_object_delta = bool(appeared or disappeared or moved or changed or delta_events)
 
         self._last_body = current.body.model_copy(deep=True)
+        self._last_light = current.light
         self._last_affordances = AffordanceMap({k: list(v) for k, v in current.affordances.items()})
         self._initialized = True
 
-        is_completely_empty = not has_any_object_delta and not body_changed and not affordances_changed
+        is_completely_empty = (
+            not has_any_object_delta
+            and not body_changed
+            and not light_changed
+            and not affordances_changed
+        )
         delta_affordances = (
             current.affordances
-            if (has_any_object_delta or affordances_changed or body_changed)
+            if (has_any_object_delta or affordances_changed or body_changed or light_changed)
             else AffordanceMap()
         )
 
         result = Percept(
             tick=w.tick,
+            light=current.light,
             body=current.body,
             objects=delta_objects,
             events=delta_events,
