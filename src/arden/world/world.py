@@ -43,6 +43,7 @@ EventType = Literal[
     "object_despawned",
     "object_moved",
     "object_changed",
+    "spoke",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -51,6 +52,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "object_despawned",
         "object_moved",
         "object_changed",
+        "spoke",
         "tick",
     }
 )
@@ -117,6 +119,7 @@ class WorldEvent(BaseModel):
     previous_position: Position | None = None
     changes: dict[str, Any] | None = None
     object: dict[str, Any] | None = None
+    text: str | None = None
 
     @property
     def kind(self) -> EventType:
@@ -127,6 +130,15 @@ class WorldEvent(BaseModel):
     def event_type(self) -> EventType:
         """Alias for ``type``."""
         return self.type
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError as exc:
+            raise KeyError(key) from exc
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
 
 
 class ObjectSpawnedEvent(WorldEvent):
@@ -179,6 +191,13 @@ class TickEvent(WorldEvent):
     """Emitted at the end of each simulation tick."""
 
     type: Literal["tick"] = "tick"
+
+
+class SpokeEvent(WorldEvent):
+    """Emitted when the agent vocalizes via ``speak(text)``."""
+
+    type: Literal["spoke"] = "spoke"
+    text: str
 
 
 EventHandler = Callable[[WorldEvent], None]
@@ -334,6 +353,8 @@ class World:
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
+        self.body_modifiers: Any = None
+        self._opaque_actions: dict[str, dict[str, Callable[..., Any]]] = {}
         self._perception_event_log: list[WorldEvent] = []
         self._has_been_perceived: bool = False
         self.events._internal_listeners.append(self._record_perception_event)
@@ -429,6 +450,7 @@ class World:
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         obj = self.objects.pop(object_id)
+        self._opaque_actions.pop(object_id, None)
         if self.body.holding == object_id:
             self.body.holding = None
         if self.body.level == f"on_top_of:{object_id}":
@@ -681,6 +703,45 @@ class World:
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         return object_top_height(self.objects[object_id], self.objects, self.terrain)
+
+    def register_opaque_action(
+        self,
+        object_id: str | WorldObject,
+        action_or_handler: str | Callable[..., Any],
+        handler: Callable[..., Any] | None = None,
+    ) -> str:
+        """Register an opaque ``action_<n>`` with a handler on ``object_id``."""
+        from arden.actions.verbs import register_opaque_action as _reg
+
+        return _reg(self, object_id, action_or_handler, handler)
+
+    register_action = register_opaque_action
+
+    def available_opaque_actions(
+        self,
+        *,
+        target: str | WorldObject | None = None,
+        modifiers: Any = None,
+    ) -> list[str]:
+        """Return ``action_<n>`` ids offered by objects currently within reach."""
+        from arden.actions.verbs import available_opaque_actions as _avail
+
+        return _avail(self, target=target, modifiers=modifiers)
+
+    available_actions = available_opaque_actions
+
+    def invoke_opaque_action(
+        self,
+        action_id: str,
+        *args: Any,
+        target: str | WorldObject | None = None,
+        modifiers: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Invoke a registered opaque ``action_<n>`` if its object is within reach."""
+        from arden.actions.verbs import invoke_opaque_action as _invoke
+
+        return _invoke(self, action_id, *args, target=target, modifiers=modifiers, **kwargs)
 
     def _topple_object(
         self,
