@@ -86,3 +86,9 @@ These choices fill in configuration defaults, compass bearings, visibility scali
 - **Sanitized events and `PerceptionTracker` deltas**: Events in `Percept.events` strip `behavior`, `velocity`, and `source` (`"creator"`). `PerceptionTracker` tracks visible objects across calls, returning a full percept on its first call (or on `full_refresh()` / `perceive(full=True)`) and delta percepts on subsequent calls containing only `appeared`, `disappeared`, `moved` (beyond `move_threshold`), and `changed` objects. When nothing changes, the delta `Percept` has `is_empty = True`, `bool(percept) = False`, and `to_text() == ""`.
 - **`look(target)` and `Percept.to_text()`**: `look` returns a `PerceivedObject` with all perceptible properties for a single target object (`look(target)` or `look(world, target)`). `Percept.to_text()` renders a deterministic, token-cheap multi-line format locked by `tests/fixtures/percept_golden.txt`.
 
+## Issue #35 — Whitelist acceptable state keys
+
+- **Single `state` allowlist (`PERCEPTIBLE_STATE_KEYS`)**: `PERCEPTIBLE_STATE_KEYS` in `src/arden/world/objects.py` is the single allowlist defining which `WorldObject.state` keys `perceptible()` (and perception event sanitization) may return. Every other key in `state` is left out of `perceptible()` while remaining on `WorldObject.state` for internal physics and serialization.
+- **`wet` is allowed; `radius` and `floating` are left out**: `PERCEPTIBLE_STATE_KEYS` is `frozenset({"wet"})`. `wet` is included because wetness is a direct physical sensation the agent can feel. `radius` is omitted because it is an internal collision-circle override and the agent already perceives `shape`, `height`, and `volume`. `floating` is left out rather than renamed: `state["floating"]` stays an internal physics flag in `World._step_physics()`, while the agent observes water drift directly from `state["wet"]` and the object's downstream position changes each tick.
+
+

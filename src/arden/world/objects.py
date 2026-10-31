@@ -34,6 +34,16 @@ _PERCEPTIBLE_FIELDS = frozenset(
     }
 )
 
+# Only raw, directly sensed physical observations belong here (never internal
+# simulation parameters like `radius`, derived labels like `floating`, or human
+# names). Future tickets must add keys here deliberately so arbitrary `state`
+# entries never leak to the agent through `perceptible()`.
+PERCEPTIBLE_STATE_KEYS: frozenset[str] = frozenset(
+    {
+        "wet",
+    }
+)
+_PERCEPTIBLE_STATE_KEYS = PERCEPTIBLE_STATE_KEYS
 _HIDDEN_OBJECT_FIELDS = frozenset(
     {
         "behavior",
@@ -245,14 +255,18 @@ class WorldObject(BaseModel):
     def perceptible(self) -> dict[str, Any]:
         """Return properties a perceiver can sense.
 
-        Hidden ``behavior`` rules, ``velocity``, and effect-revealing properties
-        (``fragile``, ``fixed``, ``binding``, ``rigidity``) are omitted. Color is
-        omitted when unset. The id is the referent (``object_7``), not a name
-        derived from it.
+        Hidden ``behavior`` rules are omitted. Color is omitted when unset.
+        Only allowlisted keys in ``state`` are included.
+        The id is the referent (``object_7``), not a name derived from it.
         """
         data = self.model_dump(mode="json", exclude=set(_HIDDEN_OBJECT_FIELDS))
         if data.get("color") is None:
             del data["color"]
+        data["state"] = {
+            key: value
+            for key, value in data["state"].items()
+            if key in PERCEPTIBLE_STATE_KEYS
+        }
         unexpected = set(data) - _PERCEPTIBLE_FIELDS
         if unexpected:
             joined = ", ".join(sorted(unexpected))
