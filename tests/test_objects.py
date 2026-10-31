@@ -8,8 +8,13 @@ import math
 import pytest
 from pydantic import ValidationError
 
+from arden.world.objects import (
+    PERCEPTIBLE_STATE_KEYS,
+    BehaviorRule,
+    ObjectFactory,
+    WorldObject,
+)
 from arden.world import World, can_bind, is_stack_stable, should_break_on_strike
-from arden.world.objects import BehaviorRule, ObjectFactory, Position, WorldObject
 
 _PHYSICAL = {
     "position": {"x": 1.5, "y": -2.0},
@@ -118,8 +123,41 @@ def test_perceptible_omits_unset_color() -> None:
 
 
 def test_perceptible_keeps_explicit_nulls_in_state() -> None:
-    view = ObjectFactory().create({**_PHYSICAL, "state": {"note": None}}).perceptible()
-    assert view["state"] == {"note": None}
+    view = ObjectFactory().create({**_PHYSICAL, "state": {"wet": None}}).perceptible()
+    assert view["state"] == {"wet": None}
+
+
+def test_perceptible_state_allowlist_filters_unallowed_keys() -> None:
+    assert "wet" in PERCEPTIBLE_STATE_KEYS
+    assert "radius" not in PERCEPTIBLE_STATE_KEYS
+    assert "floating" not in PERCEPTIBLE_STATE_KEYS
+
+    obj = ObjectFactory().create(
+        {
+            **_PHYSICAL,
+            "state": {
+                "wet": True,
+                "radius": 0.45,
+                "floating": True,
+                "label": "ball",
+                "note": "secret",
+            },
+        }
+    )
+    # Internal state retains all keys for physics and serialization
+    assert obj.state["radius"] == 0.45
+    assert obj.state["floating"] is True
+    assert obj.radius == 0.45
+
+    view = obj.perceptible()
+    encoded = json.dumps(view)
+    assert view["state"] == {"wet": True}
+    assert "radius" not in view["state"]
+    assert "floating" not in view["state"]
+    assert "label" not in view["state"]
+    assert "note" not in view["state"]
+    assert "floating" not in encoded
+    assert "secret" not in encoded
 
 
 def test_schema_rejects_a_human_label() -> None:

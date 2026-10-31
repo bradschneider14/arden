@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 
 from arden.config import PerceptionSettings, Settings, load_config
 from arden.llm.schemas import VERBS
-from arden.world.objects import Composite, Position, WorldObject
+from arden.world.objects import Composite, PERCEPTIBLE_STATE_KEYS, Position, WorldObject
 from arden.world.physics import _get_active_world, _set_active_world
 from arden.world.world import AgentBody, World, WorldEvent
 
@@ -692,11 +692,19 @@ def _sanitize_world_event(
             visibility_factor=visibility_factor,
             color_threshold=color_threshold,
         )
-        filtered = {
-            k: v
-            for k, v in raw_changes.items()
-            if k in _PERCEPTIBLE_KEYS and (k != "color" or keep_color)
-        }
+        filtered: dict[str, Any] = {}
+        for k, v in raw_changes.items():
+            if k not in _PERCEPTIBLE_KEYS or (k == "color" and not keep_color):
+                continue
+            if k == "state" and isinstance(v, Mapping):
+                allowed_state = {
+                    sk: sv for sk, sv in v.items() if sk in PERCEPTIBLE_STATE_KEYS
+                }
+                if v and not allowed_state:
+                    continue
+                filtered[k] = allowed_state
+            else:
+                filtered[k] = v
         if not filtered:
             return None
         clean_changes = filtered

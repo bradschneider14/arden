@@ -2,6 +2,7 @@
 
 from arden.world.clock import Clock, WorldClock
 from arden.world.objects import (
+    PERCEPTIBLE_STATE_KEYS,
     BehaviorRule,
     CenterOfMass,
     Composite,
@@ -55,6 +56,7 @@ from arden.world.world import (
 __all__ = [
     "EVENT_TYPES",
     "STACK_STABILITY_THRESHOLD",
+    "PERCEPTIBLE_STATE_KEYS",
     "TILE_TYPES",
     "AgentBody",
     "BehaviorRule",
