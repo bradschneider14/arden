@@ -11,6 +11,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+
+from arden.environment.daynight import DayNightConfig, DayNightCycle
+
 from arden.world.objects import (
     Composite,
     ObjectFactory,
@@ -20,6 +23,7 @@ from arden.world.objects import (
     object_radius,
     validate_world_object,
 )
+
 from arden.world.physics import (
     COLLISION_ITERATIONS,
     COLLISION_RESTITUTION,
@@ -56,6 +60,8 @@ EventType = Literal[
     "object_moved",
     "object_changed",
     "spoke",
+    "time_of_day_changed",
+    "cycle_frozen",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -65,9 +71,19 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "object_moved",
         "object_changed",
         "spoke",
+        "time_of_day_changed",
+        "cycle_frozen",
         "tick",
     }
 )
+_EVENT_TYPE_ALIASES: dict[str, str] = {
+    "time_of_day_set": "time_of_day_changed",
+    "set_time_of_day": "time_of_day_changed",
+    "time_changed": "time_of_day_changed",
+    "freeze_cycle": "cycle_frozen",
+    "cycle_freeze_changed": "cycle_frozen",
+    "daynight_frozen": "cycle_frozen",
+}
 
 
 def _coerce_position(pos: Position | Mapping[str, Any] | tuple[float, float] | list[float]) -> Position:
@@ -132,6 +148,11 @@ class WorldEvent(BaseModel):
     changes: dict[str, Any] | None = None
     object: dict[str, Any] | None = None
     text: str | None = None
+    time_of_day: float | None = None
+    previous_time_of_day: float | None = None
+    frozen: bool | None = None
+    light_level: float | None = None
+    ambient_temperature: float | None = None
 
     @property
     def kind(self) -> EventType:
@@ -212,6 +233,47 @@ class SpokeEvent(WorldEvent):
     text: str
 
 
+class TimeOfDayChangedEvent(WorldEvent):
+    """Emitted when the creator sets the world's time of day directly."""
+
+    type: Literal["time_of_day_changed"] = "time_of_day_changed"
+    source: str = "creator"
+    previous_time_of_day: float
+    time_of_day: float
+    light_level: float
+    ambient_temperature: float
+
+    @property
+    def fraction(self) -> float:
+        """Alias for ``time_of_day``."""
+        return self.time_of_day
+
+    @property
+    def light(self) -> float:
+        """Alias for ``light_level``."""
+        return self.light_level
+
+    @property
+    def temperature(self) -> float:
+        """Alias for ``ambient_temperature``."""
+        return self.ambient_temperature
+
+
+TimeOfDayEvent = TimeOfDayChangedEvent
+
+
+class CycleFrozenEvent(WorldEvent):
+    """Emitted when the creator freezes or unfreezes the day/night cycle."""
+
+    type: Literal["cycle_frozen"] = "cycle_frozen"
+    source: str = "creator"
+    frozen: bool
+    time_of_day: float
+
+
+CycleFreezeEvent = CycleFrozenEvent
+
+
 EventHandler = Callable[[WorldEvent], None]
 
 
@@ -247,6 +309,7 @@ class EventBus:
             raise TypeError("subscribe expects a callable handler or (event_type, handler)")
 
         if target_type is not None:
+            target_type = _EVENT_TYPE_ALIASES.get(target_type, target_type)
             if target_type not in EVENT_TYPES:
                 allowed = ", ".join(sorted(EVENT_TYPES))
                 raise ValueError(f"unknown event type {target_type!r}; expected one of: {allowed}")
@@ -274,10 +337,11 @@ class EventBus:
     ) -> None:
         """Remove a previously registered handler."""
         if event_type is not None:
-            if event_type not in EVENT_TYPES:
+            resolved_type = _EVENT_TYPE_ALIASES.get(event_type, event_type)
+            if resolved_type not in EVENT_TYPES:
                 allowed = ", ".join(sorted(EVENT_TYPES))
                 raise ValueError(f"unknown event type {event_type!r}; expected one of: {allowed}")
-            bucket = self._typed_subscribers[event_type]
+            bucket = self._typed_subscribers[resolved_type]
             if handler in bucket:
                 bucket.remove(handler)
             return
@@ -324,6 +388,8 @@ class World:
         | Mapping[str, WorldObject | Mapping[str, Any]]
         | None = None,
         terrain: TerrainGrid | Mapping[str, Any] | None = None,
+        daynight: DayNightCycle | DayNightConfig | Mapping[str, Any] | None = None,
+        config: Any = None,
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -355,6 +421,26 @@ class World:
             self.terrain = TerrainGrid.from_dict(terrain)
         else:
             raise TypeError("terrain must be a TerrainGrid, a mapping, or None")
+
+        self.config: Any = config
+        if daynight is None and config is not None:
+            dn_cfg = getattr(config, "daynight", None)
+            if dn_cfg is not None:
+                daynight = dn_cfg
+
+        if daynight is None:
+            self.daynight: DayNightCycle = DayNightCycle()
+        elif isinstance(daynight, DayNightCycle):
+            self.daynight = DayNightCycle.from_dict(daynight.to_dict())
+        elif isinstance(daynight, DayNightConfig):
+            self.daynight = DayNightCycle(config=daynight)
+        elif isinstance(daynight, Mapping):
+            if "config" in daynight or "time_of_day" in daynight or "frozen" in daynight:
+                self.daynight = DayNightCycle.from_dict(daynight)
+            else:
+                self.daynight = DayNightCycle(config=daynight)
+        else:
+            raise TypeError("daynight must be a DayNightCycle, DayNightConfig, mapping, or None")
 
         self.tick: int = 0
         self._factory = ObjectFactory()
@@ -400,6 +486,102 @@ class World:
     def event_bus(self) -> EventBus:
         """Alias for ``events``."""
         return self.events
+
+    @property
+    def day_night(self) -> DayNightCycle:
+        """Alias for ``daynight``."""
+        return self.daynight
+
+    @property
+    def time_of_day(self) -> float:
+        """Current time-of-day fraction in ``[0.0, 1.0)`` (0.0=midnight, 0.5=noon)."""
+        return self.daynight.time_of_day
+
+    @property
+    def cycle_frozen(self) -> bool:
+        """Return True when the day/night cycle is frozen."""
+        return self.daynight.frozen
+
+    @property
+    def is_cycle_frozen(self) -> bool:
+        """Alias for ``cycle_frozen``."""
+        return self.daynight.frozen
+
+    @property
+    def light_level(self) -> float:
+        """Current smooth light level in ``[0.0, 1.0]``."""
+        return self.daynight.light
+
+    @property
+    def light(self) -> float:
+        """Alias for ``light_level``."""
+        return self.daynight.light
+
+    @property
+    def coarse_light_level(self) -> float:
+        """Current coarse numeric light level in ``[0.0, 1.0]``."""
+        return self.daynight.coarse_light
+
+    @property
+    def coarse_light(self) -> float:
+        """Alias for ``coarse_light_level``."""
+        return self.daynight.coarse_light
+
+    @property
+    def visibility_factor(self) -> float:
+        """Current perception ``visibility_factor`` driven by the day/night cycle."""
+        return self.daynight.visibility_factor
+
+    @property
+    def ambient_temperature(self) -> float:
+        """Current ambient temperature exposed for the body-state model."""
+        return self.daynight.ambient_temperature
+
+    @property
+    def temperature(self) -> float:
+        """Alias for ``ambient_temperature``."""
+        return self.daynight.ambient_temperature
+
+    def set_time_of_day(
+        self,
+        fraction: float,
+        *,
+        source: str = "creator",
+    ) -> float:
+        """Set the world's time of day to ``fraction`` in ``[0.0, 1.0]``, emitting ``time_of_day_changed``."""
+        _set_active_world(self)
+        prev_tod = self.daynight.time_of_day
+        new_tod = self.daynight.set_time_of_day(fraction)
+        self.events.emit(
+            TimeOfDayChangedEvent(
+                tick=self.tick,
+                source=source,
+                previous_time_of_day=prev_tod,
+                time_of_day=new_tod,
+                light_level=self.daynight.light,
+                ambient_temperature=self.daynight.ambient_temperature,
+            )
+        )
+        return new_tod
+
+    def freeze_cycle(
+        self,
+        frozen: bool = True,
+        *,
+        source: str = "creator",
+    ) -> bool:
+        """Freeze or unfreeze the day/night cycle, emitting ``cycle_frozen``."""
+        _set_active_world(self)
+        new_frozen = self.daynight.freeze_cycle(frozen)
+        self.events.emit(
+            CycleFrozenEvent(
+                tick=self.tick,
+                source=source,
+                frozen=new_frozen,
+                time_of_day=self.daynight.time_of_day,
+            )
+        )
+        return new_frozen
 
     def subscribe(
         self,
@@ -1603,12 +1785,13 @@ class World:
         # Advance the simulation RNG once per tick so tick progression is
         # bound to the seeded generator and verified across save/restore.
         self.rng.random()
+        self.daynight.step(1)
         self._step_physics()
         self.events.emit(TickEvent(tick=self.tick, source="world"))
         return self.tick
 
     def snapshot(self) -> str:
-        """Serialize the full world state (including RNG, terrain, and factory state) to JSON."""
+        """Serialize the full world state (including RNG, terrain, daynight, and factory state) to JSON."""
         version, internal_state, gauss_next = self.rng.getstate()
         payload = {
             "tick": self.tick,
@@ -1618,6 +1801,7 @@ class World:
                 for obj_id in sorted(self.objects)
             },
             "terrain": self.terrain.to_dict(),
+            "daynight": self.daynight.to_dict(),
             "factory": {
                 "next": self._factory._next,
                 "used": sorted(self._factory._used),
@@ -1661,6 +1845,12 @@ class World:
         else:
             terrain = TerrainGrid()
 
+        raw_daynight = raw.get("daynight")
+        if isinstance(raw_daynight, Mapping):
+            daynight = DayNightCycle.from_dict(raw_daynight)
+        else:
+            daynight = DayNightCycle()
+
         factory = ObjectFactory()
         raw_factory = raw.get("factory")
         if isinstance(raw_factory, Mapping):
@@ -1688,6 +1878,7 @@ class World:
         self.body = body
         self.objects = restored_objects
         self.terrain = terrain
+        self.daynight = daynight
         self._factory = factory
         _set_active_world(self)
         return self

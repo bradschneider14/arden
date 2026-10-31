@@ -16,6 +16,18 @@ move_threshold = 0.1
 # Visibility factor at or below which fine detail such as color is dropped.
 color_visibility_threshold = 0.75
 
+[daynight]
+# Length of a full day/night cycle in simulation ticks.
+day_length = 600
+# Fraction of the cycle that is daytime.
+daylight_share = 0.5
+# Sensing radius at darkest night as a fraction of the daytime radius.
+min_visibility = 0.25
+# How much colder midnight is than noon.
+temperature_swing = 0.4
+# Peak daytime ambient temperature at noon.
+base_temperature = 1.0
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"
