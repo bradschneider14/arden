@@ -19,6 +19,18 @@ class WorldSettings(BaseModel):
 
     tick_rate: float = Field(default=10.0, gt=0)
     seed: int = 0
+    sensing_radius: float | None = Field(default=None, gt=0)
+
+
+class PerceptionSettings(BaseModel):
+    """Sensing radius, reach distance, and delta thresholds for perception."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sensing_radius: float = Field(default=10.0, gt=0)
+    reach_radius: float = Field(default=1.5, gt=0)
+    move_threshold: float = Field(default=0.1, ge=0.0)
+    color_visibility_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
 class LlmSettings(BaseModel):
@@ -59,6 +71,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     world: WorldSettings = Field(default_factory=WorldSettings)
+    perception: PerceptionSettings = Field(default_factory=PerceptionSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 

@@ -1,0 +1,13 @@
+tick: 1
+body: pos=(0,0) level=ground energy=0.75 comfort=0.3 holding=object_2
+objects:
+- object_2 dist=0 dir=here pos=(0,0) level=ground shape=long h=0.8 vol=0.002 w=0.4 rig=0.9 color=brown
+- object_7 dist=1 dir=N pos=(0,1) level=ground shape=sphere h=0.2 vol=0.004 w=0.3 rig=0.4 color=red state={"wet":false}
+- object_9 dist=1.2 dir=E pos=(1.2,0) level=ground shape=cube h=0.9 vol=0.12 w=8 rig=0.95 fixed=true
+- object_4 dist=4 dir=SW pos=(-2.8284,-2.8284) level=ground shape=flat h=0.1 vol=0.02 w=3.5 rig=1 color=gray
+affordances:
+- object_2: drop, place, stack
+- object_7: push, strike
+- object_9: action_3
+events:
+- moved object_7 from=(0,0.5) to=(0,1) dist=1 dir=N

@@ -189,6 +189,7 @@ class EventBus:
 
     def __init__(self) -> None:
         self._all_subscribers: list[EventHandler] = []
+        self._internal_listeners: list[EventHandler] = []
         self._typed_subscribers: dict[str, list[EventHandler]] = {
             kind: [] for kind in EVENT_TYPES
         }
@@ -263,6 +264,8 @@ class EventBus:
 
     def emit(self, event: WorldEvent) -> None:
         """Deliver ``event`` to matching subscribers in registration order."""
+        for callback in list(self._internal_listeners):
+            callback(event)
         for callback in list(self._typed_subscribers.get(event.type, ())):
             callback(event)
         for callback in list(self._all_subscribers):
@@ -331,6 +334,9 @@ class World:
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
+        self._perception_event_log: list[WorldEvent] = []
+        self._has_been_perceived: bool = False
+        self.events._internal_listeners.append(self._record_perception_event)
 
         if objects is not None:
             items: Iterable[WorldObject | Mapping[str, Any]]
@@ -348,6 +354,13 @@ class World:
                 self.objects[created.id] = created
 
         _set_active_world(self)
+
+    def _record_perception_event(self, event: WorldEvent) -> None:
+        if event.type == "tick":
+            return
+        if event.type == "object_spawned" and not self._has_been_perceived:
+            return
+        self._perception_event_log.append(event)
 
     @property
     def agent_body(self) -> AgentBody:
