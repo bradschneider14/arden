@@ -1,4 +1,4 @@
-"""Agent body verbs, action results, body modifiers, and opaque action registration."""
+"""Agent body verbs, building verbs, action results, body modifiers, and opaque action registration."""
 
 from arden.actions.verbs import (
     DEFAULT_FRAGILE_BREAK_THRESHOLD,
@@ -17,12 +17,14 @@ from arden.actions.verbs import (
     ReasonCode,
     available_actions,
     available_opaque_actions,
+    bind,
     drop,
     execute_action,
     execute_opaque_action,
     get_opaque_actions,
     grab,
     in_reach,
+    insert,
     invoke_opaque_action,
     look,
     move,
@@ -33,9 +35,12 @@ from arden.actions.verbs import (
     register_action,
     register_opaque_action,
     run_opaque_action,
+    separate,
     speak,
+    stack,
     strike,
 )
+from arden.world.objects import Composite
 
 __all__ = [
     "DEFAULT_FRAGILE_BREAK_THRESHOLD",
@@ -50,16 +55,19 @@ __all__ = [
     "TOO_HEAVY",
     "ActionResult",
     "BodyModifiers",
+    "Composite",
     "OpaqueHandler",
     "ReasonCode",
     "available_actions",
     "available_opaque_actions",
+    "bind",
     "drop",
     "execute_action",
     "execute_opaque_action",
     "get_opaque_actions",
     "grab",
     "in_reach",
+    "insert",
     "invoke_opaque_action",
     "look",
     "move",
@@ -70,6 +78,8 @@ __all__ = [
     "register_action",
     "register_opaque_action",
     "run_opaque_action",
+    "separate",
     "speak",
+    "stack",
     "strike",
 ]
