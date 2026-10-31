@@ -17,7 +17,8 @@ _OBJECT_ID = re.compile(r"^object_[0-9]+$")
 _LEVEL = re.compile(r"^(?:ground|raised|on_top_of:object_[0-9]+|inside:object_[0-9]+)$")
 _VERB = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# Fields a perceiver may see. `behavior` is intentionally absent.
+# Fields a perceiver may see. `behavior`, `velocity`, and effect-revealing
+# properties (`fragile`, `fixed`, `binding`, `rigidity`) are intentionally absent.
 _PERCEPTIBLE_FIELDS = frozenset(
     {
         "id",
@@ -27,13 +28,20 @@ _PERCEPTIBLE_FIELDS = frozenset(
         "height",
         "volume",
         "weight",
-        "rigidity",
-        "binding",
         "hollow",
-        "fragile",
         "color",
-        "fixed",
         "state",
+    }
+)
+
+_HIDDEN_OBJECT_FIELDS = frozenset(
+    {
+        "behavior",
+        "velocity",
+        "fragile",
+        "fixed",
+        "binding",
+        "rigidity",
     }
 )
 
@@ -237,10 +245,12 @@ class WorldObject(BaseModel):
     def perceptible(self) -> dict[str, Any]:
         """Return properties a perceiver can sense.
 
-        Hidden ``behavior`` rules are omitted. Color is omitted when unset.
-        The id is the referent (``object_7``), not a name derived from it.
+        Hidden ``behavior`` rules, ``velocity``, and effect-revealing properties
+        (``fragile``, ``fixed``, ``binding``, ``rigidity``) are omitted. Color is
+        omitted when unset. The id is the referent (``object_7``), not a name
+        derived from it.
         """
-        data = self.model_dump(mode="json", exclude={"behavior", "velocity"})
+        data = self.model_dump(mode="json", exclude=set(_HIDDEN_OBJECT_FIELDS))
         if data.get("color") is None:
             del data["color"]
         unexpected = set(data) - _PERCEPTIBLE_FIELDS

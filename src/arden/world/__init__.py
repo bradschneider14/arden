@@ -15,11 +15,13 @@ from arden.world.physics import (
     Tile,
     TileType,
     apply_impulse,
+    can_bind,
     is_occluded,
     is_stack_stable,
     max_carry_step,
     object_top_height,
     objects_overlap,
+    should_break_on_strike,
 )
 from arden.world.world import (
     EVENT_TYPES,
@@ -61,10 +63,12 @@ __all__ = [
     "WorldEvent",
     "WorldObject",
     "apply_impulse",
+    "can_bind",
     "is_occluded",
     "is_stack_stable",
     "max_carry_step",
     "object_radius",
     "object_top_height",
     "objects_overlap",
+    "should_break_on_strike",
 ]

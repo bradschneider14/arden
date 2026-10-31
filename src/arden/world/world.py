@@ -28,11 +28,13 @@ from arden.world.physics import (
     Tile,
     TileType,
     _set_active_world,
+    can_bind,
     compute_impulse_delta,
     is_occluded as _is_occluded_helper,
     is_stack_stable,
     max_carry_step,
     object_top_height,
+    should_break_on_strike,
 )
 
 _OBJECT_ID = re.compile(r"^object_[0-9]+$")
@@ -625,6 +627,97 @@ class World:
             new_vel = Velocity(x=obj.velocity.x + dv.x, y=obj.velocity.y + dv.y)
             self.objects[object_id] = obj.model_copy(update={"velocity": new_vel})
         return self.objects[object_id]
+
+    def push(
+        self,
+        object_id: str,
+        direction: Position | Velocity | Mapping[str, Any] | tuple[float, float] | list[float] | str | int | float = (1.0, 0.0),
+        force: float | None = None,
+    ) -> WorldObject:
+        """Push ``object_id`` with ``force`` along ``direction``."""
+        if force is None:
+            if isinstance(direction, int | float) and not isinstance(direction, bool):
+                return self.apply_impulse(object_id, (1.0, 0.0), float(direction))
+            return self.apply_impulse(object_id, direction, 0.5)
+        return self.apply_impulse(object_id, direction, float(force))
+
+    def strike(
+        self,
+        object_id: str,
+        force_or_direction: Any = 0.5,
+        force: float | None = None,
+        *,
+        direction: Any = (1.0, 0.0),
+        source: str = "world",
+    ) -> WorldObject:
+        """Strike ``object_id`` with ``force``; fragile objects break, movable ones receive an impulse."""
+        _set_active_world(self)
+        if object_id not in self.objects:
+            raise KeyError(f"unknown object id: {object_id}")
+
+        if force is None:
+            if isinstance(force_or_direction, int | float) and not isinstance(force_or_direction, bool):
+                force_val = float(force_or_direction)
+                dir_val = direction
+            else:
+                force_val = 0.5
+                dir_val = force_or_direction
+        else:
+            force_val = float(force)
+            dir_val = force_or_direction
+
+        obj = self.objects[object_id]
+        if should_break_on_strike(obj, force_val):
+            new_state = {**obj.state, "broken": True}
+            return self.update_object(object_id, {"state": new_state}, source=source)
+
+        if not obj.fixed and force_val > 0.0:
+            self.apply_impulse(object_id, dir_val, force_val)
+        return self.objects[object_id]
+
+    def bind(
+        self,
+        first_id: str,
+        second_id: str,
+        binder_id: str | None = None,
+        *,
+        source: str = "world",
+    ) -> bool:
+        """Bind ``first_id`` and ``second_id`` using a binding object. Returns True on success."""
+        _set_active_world(self)
+        if first_id not in self.objects:
+            raise KeyError(f"unknown object id: {first_id}")
+        if second_id not in self.objects:
+            raise KeyError(f"unknown object id: {second_id}")
+        if first_id == second_id:
+            raise ValueError("cannot bind an object to itself")
+
+        first = self.objects[first_id]
+        second = self.objects[second_id]
+        if binder_id is not None:
+            if binder_id not in self.objects:
+                raise KeyError(f"unknown object id: {binder_id}")
+            binder = self.objects[binder_id]
+        elif can_bind(first):
+            binder = first
+        elif can_bind(second):
+            binder = second
+        else:
+            return False
+
+        if not can_bind(binder):
+            return False
+
+        first_bound = list(first.state.get("bound_to", []))
+        if second_id not in first_bound:
+            first_bound.append(second_id)
+        second_bound = list(second.state.get("bound_to", []))
+        if first_id not in second_bound:
+            second_bound.append(first_id)
+
+        self.update_object(first_id, {"state": {**first.state, "bound_to": first_bound}}, source=source)
+        self.update_object(second_id, {"state": {**second.state, "bound_to": second_bound}}, source=source)
+        return True
 
     def stack(
         self,
