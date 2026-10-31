@@ -9,6 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from arden.environment.daynight import DayNightConfig, DayNightSettings
+from arden.environment.weather import WeatherConfig, WeatherSettings
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 DEFAULT_CONFIG_PATH = Path("arden.toml")
@@ -81,6 +82,7 @@ class Settings(BaseModel):
     world: WorldSettings = Field(default_factory=WorldSettings)
     perception: PerceptionSettings = Field(default_factory=PerceptionSettings)
     daynight: DayNightSettings = Field(default_factory=DayNightSettings)
+    weather: WeatherSettings = Field(default_factory=WeatherSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 

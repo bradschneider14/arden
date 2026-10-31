@@ -1,4 +1,4 @@
-"""Environment systems: day and night cycle, light, visibility, and temperature."""
+"""Environment systems: day and night cycle, weather, light, visibility, and temperature."""
 
 from __future__ import annotations
 
@@ -22,24 +22,100 @@ from arden.environment.daynight import (
     compute_visibility_factor,
     normalize_time_of_day,
 )
+from arden.environment.weather import (
+    COLD_TEMPERATURE_DROP,
+    DEFAULT_TICKS_PER_HOUR,
+    DEFAULT_WEATHER_CHANCE,
+    DEFAULT_WEATHER_DURATION,
+    DEFAULT_WEATHER_INTENSITY,
+    DEFAULT_WEATHER_SEED,
+    DEFAULT_WEATHER_TRANSITIONS,
+    DEFAULT_WIND_DIRECTION,
+    HOLLOW_SHELTER_EXPOSURE,
+    RAIN_IMPULSE_SLIP_BONUS,
+    RAIN_SLIPPERINESS_FACTOR,
+    RAIN_WET_THRESHOLD,
+    STORM_LIGHT_REDUCTION,
+    STORM_TEMPERATURE_DROP,
+    TREE_MIN_HEIGHT,
+    TREE_MIN_VOLUME,
+    TREE_SHELTER_EXPOSURE,
+    WEATHER_SOURCES,
+    WEATHER_TYPES,
+    WIND_MAX_OBJECT_WEIGHT,
+    WIND_PUSH_STRENGTH,
+    ScheduledWeather,
+    WeatherConfig,
+    WeatherSettings,
+    WeatherSource,
+    WeatherState,
+    WeatherSystem,
+    WeatherType,
+    compute_shelter_exposure,
+    set_weather,
+    validate_intensity,
+    validate_weather_type,
+)
+
+
+def __getattr__(name: str) -> object:
+    if name in ("WeatherChangedEvent", "WeatherEvent"):
+        from arden.world.world import WeatherChangedEvent, WeatherEvent
+
+        return WeatherChangedEvent if name == "WeatherChangedEvent" else WeatherEvent
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "COARSE_LIGHT_DECIMALS",
+    "COLD_TEMPERATURE_DROP",
     "DAWN",
     "DEFAULT_BASE_TEMPERATURE",
     "DEFAULT_DAY_LENGTH",
     "DEFAULT_DAYLIGHT_SHARE",
     "DEFAULT_MIN_VISIBILITY",
     "DEFAULT_TEMPERATURE_SWING",
+    "DEFAULT_TICKS_PER_HOUR",
+    "DEFAULT_WEATHER_CHANCE",
+    "DEFAULT_WEATHER_DURATION",
+    "DEFAULT_WEATHER_INTENSITY",
+    "DEFAULT_WEATHER_SEED",
+    "DEFAULT_WEATHER_TRANSITIONS",
+    "DEFAULT_WIND_DIRECTION",
     "DUSK",
+    "HOLLOW_SHELTER_EXPOSURE",
     "MIDNIGHT",
     "NOON",
+    "RAIN_IMPULSE_SLIP_BONUS",
+    "RAIN_SLIPPERINESS_FACTOR",
+    "RAIN_WET_THRESHOLD",
+    "STORM_LIGHT_REDUCTION",
+    "STORM_TEMPERATURE_DROP",
+    "TREE_MIN_HEIGHT",
+    "TREE_MIN_VOLUME",
+    "TREE_SHELTER_EXPOSURE",
+    "WEATHER_SOURCES",
+    "WEATHER_TYPES",
+    "WIND_MAX_OBJECT_WEIGHT",
+    "WIND_PUSH_STRENGTH",
     "DayNightConfig",
     "DayNightCycle",
     "DayNightSettings",
+    "ScheduledWeather",
+    "WeatherChangedEvent",
+    "WeatherConfig",
+    "WeatherEvent",
+    "WeatherSettings",
+    "WeatherSource",
+    "WeatherState",
+    "WeatherSystem",
+    "WeatherType",
     "coarse_light_level",
     "compute_ambient_temperature",
     "compute_light_level",
+    "compute_shelter_exposure",
     "compute_visibility_factor",
     "normalize_time_of_day",
+    "set_weather",
+    "validate_intensity",
+    "validate_weather_type",
 ]
