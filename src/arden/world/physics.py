@@ -128,8 +128,8 @@ def normalize_direction(
             raise ValueError("direction angle must be finite")
         return (math.cos(angle), math.sin(angle))
 
-    if isinstance(direction, Position | Velocity):
-        dx, dy = direction.x, direction.y
+    if isinstance(direction, Position | Velocity) or (hasattr(direction, "x") and hasattr(direction, "y")):
+        dx, dy = float(direction.x), float(direction.y)
     elif isinstance(direction, Mapping):
         if "x" in direction and "y" in direction:
             dx, dy = float(direction["x"]), float(direction["y"])

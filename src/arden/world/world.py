@@ -12,7 +12,26 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-from arden.environment.daynight import DayNightConfig, DayNightCycle
+from arden.environment.daynight import (
+    DayNightConfig,
+    DayNightCycle,
+    coarse_light_level as _coarse_light_level,
+    compute_visibility_factor as _compute_visibility_factor,
+)
+from arden.environment.weather import (
+    RAIN_IMPULSE_SLIP_BONUS,
+    RAIN_SLIPPERINESS_FACTOR,
+    TREE_SHELTER_EXPOSURE,
+    WIND_MAX_OBJECT_WEIGHT,
+    WIND_PUSH_STRENGTH,
+    WeatherConfig,
+    WeatherSource,
+    WeatherState,
+    WeatherSystem,
+    WeatherType,
+    compute_shelter_exposure,
+    set_weather,
+)
 
 from arden.world.objects import (
     Composite,
@@ -62,6 +81,7 @@ EventType = Literal[
     "spoke",
     "time_of_day_changed",
     "cycle_frozen",
+    "weather_changed",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -73,6 +93,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "spoke",
         "time_of_day_changed",
         "cycle_frozen",
+        "weather_changed",
         "tick",
     }
 )
@@ -83,6 +104,9 @@ _EVENT_TYPE_ALIASES: dict[str, str] = {
     "freeze_cycle": "cycle_frozen",
     "cycle_freeze_changed": "cycle_frozen",
     "daynight_frozen": "cycle_frozen",
+    "weather": "weather_changed",
+    "weather_change": "weather_changed",
+    "set_weather": "weather_changed",
 }
 
 
@@ -107,6 +131,8 @@ class AgentBody(BaseModel):
     energy: float = Field(default=1.0, ge=0.0, le=1.0)
     comfort: float = Field(default=1.0, ge=0.0, le=1.0)
     holding: str | None = None
+    wet: bool = False
+    wetness: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @field_validator("level")
     @classmethod
@@ -153,6 +179,11 @@ class WorldEvent(BaseModel):
     frozen: bool | None = None
     light_level: float | None = None
     ambient_temperature: float | None = None
+    weather_type: WeatherType | None = None
+    previous_weather_type: WeatherType | None = None
+    intensity: float | None = None
+    previous_intensity: float | None = None
+    duration: int | None = None
 
     @property
     def kind(self) -> EventType:
@@ -274,6 +305,33 @@ class CycleFrozenEvent(WorldEvent):
 CycleFreezeEvent = CycleFrozenEvent
 
 
+class WeatherChangedEvent(WorldEvent):
+    """Emitted whenever the active weather changes (manual override or automated transition)."""
+
+    type: Literal["weather_changed"] = "weather_changed"
+    source: Literal["manual", "automated"] = "automated"
+    previous_weather_type: WeatherType
+    weather_type: WeatherType
+    previous_intensity: float = Field(ge=0.0, le=1.0)
+    intensity: float = Field(ge=0.0, le=1.0)
+    duration: int = Field(gt=0)
+    light_level: float | None = None
+    ambient_temperature: float | None = None
+
+    @property
+    def weather(self) -> WeatherType:
+        """Alias for ``weather_type``."""
+        return self.weather_type
+
+    @property
+    def previous_weather(self) -> WeatherType:
+        """Alias for ``previous_weather_type``."""
+        return self.previous_weather_type
+
+
+WeatherEvent = WeatherChangedEvent
+
+
 EventHandler = Callable[[WorldEvent], None]
 
 
@@ -389,6 +447,7 @@ class World:
         | None = None,
         terrain: TerrainGrid | Mapping[str, Any] | None = None,
         daynight: DayNightCycle | DayNightConfig | Mapping[str, Any] | None = None,
+        weather: WeatherSystem | WeatherConfig | Mapping[str, Any] | None = None,
         config: Any = None,
     ) -> None:
         if isinstance(rng, random.Random):
@@ -441,6 +500,31 @@ class World:
                 self.daynight = DayNightCycle(config=daynight)
         else:
             raise TypeError("daynight must be a DayNightCycle, DayNightConfig, mapping, or None")
+
+        if weather is None and config is not None:
+            w_cfg = getattr(config, "weather", None)
+            if w_cfg is not None:
+                weather = w_cfg
+
+        if weather is None:
+            default_w_seed = (
+                seed
+                if seed is not None
+                else (rng if isinstance(rng, int) and not isinstance(rng, bool) else 0)
+            )
+            self.weather: WeatherSystem = WeatherSystem(seed=default_w_seed)
+        elif isinstance(weather, WeatherSystem):
+            self.weather = WeatherSystem.from_dict(weather.to_dict())
+        elif isinstance(weather, WeatherConfig):
+            self.weather = WeatherSystem(config=weather)
+        elif isinstance(weather, Mapping):
+            if "config" in weather or "rng_state" in weather or "remaining_ticks" in weather:
+                self.weather = WeatherSystem.from_dict(weather)
+            else:
+                self.weather = WeatherSystem(config=weather)
+        else:
+            raise TypeError("weather must be a WeatherSystem, WeatherConfig, mapping, or None")
+        self.weather._bind_world(self)
 
         self.tick: int = 0
         self._factory = ObjectFactory()
@@ -510,37 +594,37 @@ class World:
     @property
     def light_level(self) -> float:
         """Current smooth light level in ``[0.0, 1.0]``."""
-        return self.daynight.light
+        return round(self.daynight.light * self.weather.light_multiplier, 10)
 
     @property
     def light(self) -> float:
         """Alias for ``light_level``."""
-        return self.daynight.light
+        return self.light_level
 
     @property
     def coarse_light_level(self) -> float:
         """Current coarse numeric light level in ``[0.0, 1.0]``."""
-        return self.daynight.coarse_light
+        return _coarse_light_level(self.light_level)
 
     @property
     def coarse_light(self) -> float:
         """Alias for ``coarse_light_level``."""
-        return self.daynight.coarse_light
+        return self.coarse_light_level
 
     @property
     def visibility_factor(self) -> float:
         """Current perception ``visibility_factor`` driven by the day/night cycle."""
-        return self.daynight.visibility_factor
+        return round(self.daynight.visibility_factor * self.weather.light_multiplier, 10)
 
     @property
     def ambient_temperature(self) -> float:
         """Current ambient temperature exposed for the body-state model."""
-        return self.daynight.ambient_temperature
+        return round(self.daynight.ambient_temperature - self.weather.temperature_drop, 10)
 
     @property
     def temperature(self) -> float:
         """Alias for ``ambient_temperature``."""
-        return self.daynight.ambient_temperature
+        return self.ambient_temperature
 
     def set_time_of_day(
         self,
@@ -558,8 +642,8 @@ class World:
                 source=source,
                 previous_time_of_day=prev_tod,
                 time_of_day=new_tod,
-                light_level=self.daynight.light,
-                ambient_temperature=self.daynight.ambient_temperature,
+                light_level=self.light_level,
+                ambient_temperature=self.ambient_temperature,
             )
         )
         return new_tod
@@ -582,6 +666,174 @@ class World:
             )
         )
         return new_frozen
+
+    @property
+    def weather_type(self) -> WeatherType:
+        """Current active weather type (``clear``, ``rain``, ``wind``, ``cold``, ``storm``)."""
+        return self.weather.type
+
+    @property
+    def weather_intensity(self) -> float:
+        """Current active weather intensity in ``[0.0, 1.0]``."""
+        return self.weather.intensity
+
+    @property
+    def weather_state(self) -> WeatherState:
+        """Current ``WeatherState`` snapshot."""
+        return self.weather.state
+
+    @property
+    def weather_automation_paused(self) -> bool:
+        """True when automated weather transitions are paused."""
+        return self.weather.paused
+
+    @property
+    def surface_slipperiness(self) -> float:
+        """Current surface slipperiness in ``[0.0, 1.0]`` caused by rain or storm."""
+        return self.weather.surface_slipperiness
+
+    @property
+    def is_slippery(self) -> bool:
+        """True when rain or storm makes exposed surfaces slippery."""
+        return self.weather.is_slippery
+
+    def _emit_weather_changed_event(
+        self,
+        *,
+        tick: int,
+        source: WeatherSource,
+        previous_weather_type: WeatherType,
+        weather_type: WeatherType,
+        previous_intensity: float,
+        intensity: float,
+        duration: int,
+    ) -> None:
+        self.events.emit(
+            WeatherChangedEvent(
+                tick=tick,
+                source=source,
+                previous_weather_type=previous_weather_type,
+                weather_type=weather_type,
+                previous_intensity=previous_intensity,
+                intensity=intensity,
+                duration=duration,
+                light_level=self.light_level,
+                ambient_temperature=self.ambient_temperature,
+            )
+        )
+
+    def set_weather(
+        self,
+        type: WeatherType | None = None,
+        intensity: float | None = None,
+        duration: int | None = None,
+        start_at: int | None = None,
+        *,
+        weather_type: WeatherType | None = None,
+        wind_direction: Any = None,
+    ) -> WeatherState:
+        """Set or schedule a manual weather event on the world."""
+        _set_active_world(self)
+        return self.weather.set_weather(
+            type,
+            intensity,
+            duration,
+            start_at=start_at,
+            weather_type=weather_type,
+            wind_direction=wind_direction,
+            current_tick=self.tick,
+        )
+
+    def pause_weather_automation(self, paused: bool = True) -> bool:
+        """Pause or unpause automated weather transitions."""
+        _set_active_world(self)
+        return self.weather.pause_automation(paused)
+
+    def resume_weather_automation(self) -> bool:
+        """Resume automated weather transitions."""
+        _set_active_world(self)
+        return self.weather.resume_automation()
+
+    def set_weather_automation(self, enabled: bool) -> bool:
+        """Enable or disable automated weather transitions."""
+        _set_active_world(self)
+        return self.weather.set_automation(enabled)
+
+    pause_weather = pause_weather_automation
+    resume_weather = resume_weather_automation
+
+    def weather_exposure_at(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> tuple[float, float]:
+        """Return ``(rain_exposure, wind_exposure)`` in ``[0.0, 1.0]`` for ``target``."""
+        resolved = self._resolve_exposure_target(target)
+        return compute_shelter_exposure(self, resolved)
+
+    def rain_exposure_at(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> float:
+        """Return rain exposure in ``[0.0, 1.0]`` for ``target`` (reduced under a tree or inside a hollow object)."""
+        return self.weather_exposure_at(target)[0]
+
+    def wind_exposure_at(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> float:
+        """Return wind exposure in ``[0.0, 1.0]`` for ``target`` (reduced under a tree or inside a hollow object)."""
+        return self.weather_exposure_at(target)[1]
+
+    def shelter_factor_at(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> float:
+        """Return shelter protection in ``[0.0, 1.0]`` (``0.0`` exposed, ``> 0.0`` sheltered)."""
+        rain_exp, wind_exp = self.weather_exposure_at(target)
+        return round(1.0 - min(rain_exp, wind_exp), 6)
+
+    def is_sheltered(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> bool:
+        """Return True if ``target`` has reduced rain or wind exposure from shelter."""
+        rain_exp, wind_exp = self.weather_exposure_at(target)
+        return rain_exp < 1.0 or wind_exp < 1.0
+
+    def surface_slipperiness_at(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> float:
+        """Return local surface slipperiness in ``[0.0, 1.0]`` at ``target``."""
+        base = self.weather.surface_slipperiness
+        if base <= 0.0:
+            return 0.0
+        if target is None:
+            return base
+        rain_exp = self.rain_exposure_at(target)
+        return round(base * rain_exp, 6)
+
+    def surface_friction_at(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None = None,
+    ) -> float:
+        """Return effective surface friction factor in ``(0.0, 1.0]`` (lowered when slippery in rain)."""
+        slip = self.surface_slipperiness_at(target)
+        return round(max(0.1, 1.0 - RAIN_SLIPPERINESS_FACTOR * slip), 6)
+
+    def _resolve_exposure_target(
+        self,
+        target: Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float] | str | None,
+    ) -> Position | WorldObject | AgentBody | Mapping[str, Any] | tuple[float, float] | list[float]:
+        if target is None:
+            return self.body
+        if isinstance(target, str):
+            if target == "agent" or target == "body":
+                return self.body
+            if target in self.objects:
+                return self.objects[target]
+            raise KeyError(f"unknown object id: {target}")
+        return target
 
     def subscribe(
         self,
@@ -850,6 +1102,10 @@ class World:
             raise KeyError(f"unknown object id: {object_id}")
         obj = self.objects[object_id]
         dv = compute_impulse_delta(obj, direction, force)
+        slip = self.surface_slipperiness_at(obj) if not obj.fixed else 0.0
+        if slip > 0.0 and dv.speed > 0.0:
+            slip_scale = 1.0 + RAIN_IMPULSE_SLIP_BONUS * slip
+            dv = Velocity(x=dv.x * slip_scale, y=dv.y * slip_scale)
         if dv.speed > 0.0:
             new_vel = Velocity(x=obj.velocity.x + dv.x, y=obj.velocity.y + dv.y)
             self.objects[object_id] = obj.model_copy(update={"velocity": new_vel})
@@ -1555,6 +1811,59 @@ class World:
                         source="world",
                     )
 
+    def _apply_weather_effects(self) -> None:
+        """Apply per-tick rain wetting and wind impulses to the agent and objects."""
+        rain_int = self.weather.rain_intensity
+        wind_spd = self.weather.wind_speed
+
+        # 1. Rain wetting on agent and exposed objects
+        if rain_int > 0.0:
+            agent_rain_exp, _ = compute_shelter_exposure(self, self.body)
+            if agent_rain_exp > TREE_SHELTER_EXPOSURE:
+                self.body.wet = True
+                self.body.wetness = round(
+                    min(1.0, max(self.body.wetness, rain_int * agent_rain_exp)), 4
+                )
+
+            for obj_id in sorted(self.objects):
+                obj = self.objects[obj_id]
+                target_for_exp: Any = self.body if obj_id == self.body.holding else obj
+                obj_rain_exp, _ = compute_shelter_exposure(self, target_for_exp)
+                if obj_rain_exp > TREE_SHELTER_EXPOSURE and obj.state.get("wet") is not True:
+                    new_state = {**obj.state, "wet": True}
+                    updated = obj.model_copy(update={"state": new_state})
+                    self.objects[obj_id] = updated
+                    self.events.emit(
+                        ObjectChangedEvent(
+                            tick=self.tick,
+                            source="world",
+                            object_id=obj_id,
+                            changes={"state": new_state},
+                            object=updated.model_dump(mode="json"),
+                        )
+                    )
+
+        # 2. Wind pushes very light objects (leaves, weight <= WIND_MAX_OBJECT_WEIGHT) each tick
+        if wind_spd > 0.0:
+            held = self.body.holding
+            w_dir = self.weather.wind_direction
+            for obj_id in sorted(self.objects):
+                if obj_id == held:
+                    continue
+                obj = self.objects[obj_id]
+                if obj.fixed or obj.weight > WIND_MAX_OBJECT_WEIGHT:
+                    continue
+                if obj.level not in ("ground", "raised"):
+                    continue
+                _, obj_wind_exp = compute_shelter_exposure(self, obj)
+                eff_wind = wind_spd * obj_wind_exp
+                if eff_wind <= 0.0:
+                    continue
+                dv = compute_impulse_delta(obj, w_dir, eff_wind * WIND_PUSH_STRENGTH)
+                if dv.speed > 0.0:
+                    new_vel = Velocity(x=obj.velocity.x + dv.x, y=obj.velocity.y + dv.y)
+                    self.objects[obj_id] = obj.model_copy(update={"velocity": new_vel})
+
     def _step_physics(self) -> None:
         """Execute one deterministic tick of 2.5D physics."""
         if not self.objects:
@@ -1734,6 +2043,9 @@ class World:
             if obj is None or obj.fixed or obj.velocity.speed == 0.0:
                 continue
             retention = SHAPE_RETENTION.get(obj.shape, 0.60)
+            slip = self.surface_slipperiness_at(obj)
+            if slip > 0.0:
+                retention = min(0.95, retention + (1.0 - retention) * RAIN_SLIPPERINESS_FACTOR * slip)
             nvx = obj.velocity.x * retention
             nvy = obj.velocity.y * retention
             if math.hypot(nvx, nvy) < STOP_SPEED_EPSILON:
@@ -1786,7 +2098,10 @@ class World:
         # bound to the seeded generator and verified across save/restore.
         self.rng.random()
         self.daynight.step(1)
+        self.weather.begin_tick(self.tick)
+        self._apply_weather_effects()
         self._step_physics()
+        self.weather.end_tick(self.tick)
         self.events.emit(TickEvent(tick=self.tick, source="world"))
         return self.tick
 
@@ -1802,6 +2117,7 @@ class World:
             },
             "terrain": self.terrain.to_dict(),
             "daynight": self.daynight.to_dict(),
+            "weather": self.weather.to_dict(),
             "factory": {
                 "next": self._factory._next,
                 "used": sorted(self._factory._used),
@@ -1851,6 +2167,12 @@ class World:
         else:
             daynight = DayNightCycle()
 
+        raw_weather = raw.get("weather")
+        if isinstance(raw_weather, Mapping):
+            weather = WeatherSystem.from_dict(raw_weather)
+        else:
+            weather = WeatherSystem()
+
         factory = ObjectFactory()
         raw_factory = raw.get("factory")
         if isinstance(raw_factory, Mapping):
@@ -1879,6 +2201,8 @@ class World:
         self.objects = restored_objects
         self.terrain = terrain
         self.daynight = daynight
+        self.weather = weather
+        self.weather._bind_world(self)
         self._factory = factory
         _set_active_world(self)
         return self

@@ -44,7 +44,7 @@ _PERCEPTIBLE_FIELDS = frozenset(
 # entries never leak to the agent through `perceptible()`.
 PERCEPTIBLE_STATE_KEYS: frozenset[str] = frozenset(
     {
-        "wet",
+        "wet", "made_by_agent",
     }
 )
 _PERCEPTIBLE_STATE_KEYS = PERCEPTIBLE_STATE_KEYS
