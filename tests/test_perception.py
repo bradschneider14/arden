@@ -379,7 +379,8 @@ def test_look_returns_detailed_percept_for_one_object() -> None:
     assert detail_by_id.hollow is True
     assert detail_by_id.fragile is True
     assert detail_by_id.color == "amber"
-    assert detail_by_id.state == {"wet": False, "contents": []}
+    assert detail_by_id.state == {"wet": False}
+    assert "contents" not in detail_by_id.state
     assert detail_by_id.properties == target.perceptible()
     assert "behavior" not in detail_by_id
     assert "secret" not in detail_by_id.to_json()
@@ -490,3 +491,44 @@ def test_percept_to_text_matches_golden_file() -> None:
     assert parsed["tick"] == 1
     assert parsed["body"]["holding"] == "object_2"
     assert [o["id"] for o in parsed["objects"]] == ["object_2", "object_7", "object_9", "object_4"]
+
+
+def test_perception_filters_unallowed_state_keys_from_objects_and_events() -> None:
+    world = World(seed=21, body={"position": {"x": 0.0, "y": 0.0}})
+    world.set_tile(0, 1, "water", flow=(1.0, 0.0))
+    leaf = world.spawn(
+        {
+            **_BASE_OBJ,
+            "id": "object_1",
+            "shape": "flat",
+            "weight": 0.1,
+            "state": {"wet": False, "radius": 0.35, "secret_label": "maple_leaf"},
+        },
+        {"x": 0.5, "y": 1.5},
+    )
+
+    # Step physics so water sets state["wet"] = True and state["floating"] = True
+    world.step()
+    assert world.objects[leaf.id].state["wet"] is True
+    assert world.objects[leaf.id].state["floating"] is True
+    assert world.objects[leaf.id].state["radius"] == 0.35
+
+    percept = perceive(world, world.body)
+    obj_view = percept.objects[0]
+    assert obj_view.state == {"wet": True}
+    assert obj_view.properties["state"] == {"wet": True}
+    assert "floating" not in percept.to_text()
+    assert "floating" not in percept.to_json()
+    assert "radius" not in percept.to_text()
+    assert "radius" not in percept.to_json()
+    assert "secret_label" not in percept.to_text()
+    assert "maple_leaf" not in percept.to_json()
+
+    # Updating only unallowed state keys produces no perceptible state event
+    world.update_object(leaf.id, {"state": {**world.objects[leaf.id].state, "radius": 0.5}})
+    percept_after_hidden = perceive(world, world.body)
+    assert percept_after_hidden.objects[0].state == {"wet": True}
+    for ev in percept_after_hidden.events:
+        if ev.changes and "state" in ev.changes:
+            assert "radius" not in ev.changes["state"]
+            assert "floating" not in ev.changes["state"]
