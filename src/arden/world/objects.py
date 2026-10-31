@@ -17,7 +17,8 @@ _OBJECT_ID = re.compile(r"^object_[0-9]+$")
 _LEVEL = re.compile(r"^(?:ground|raised|on_top_of:object_[0-9]+|inside:object_[0-9]+)$")
 _VERB = re.compile(r"^[a-z][a-z0-9_]*$")
 
-# Fields a perceiver may see. `behavior` is intentionally absent.
+# Fields a perceiver may see. `behavior`, `velocity`, and effect-revealing
+# properties (`fragile`, `fixed`, `binding`, `rigidity`) are intentionally absent.
 _PERCEPTIBLE_FIELDS = frozenset(
     {
         "id",
@@ -27,12 +28,8 @@ _PERCEPTIBLE_FIELDS = frozenset(
         "height",
         "volume",
         "weight",
-        "rigidity",
-        "binding",
         "hollow",
-        "fragile",
         "color",
-        "fixed",
         "state",
     }
 )
@@ -47,6 +44,16 @@ PERCEPTIBLE_STATE_KEYS: frozenset[str] = frozenset(
     }
 )
 _PERCEPTIBLE_STATE_KEYS = PERCEPTIBLE_STATE_KEYS
+_HIDDEN_OBJECT_FIELDS = frozenset(
+    {
+        "behavior",
+        "velocity",
+        "fragile",
+        "fixed",
+        "binding",
+        "rigidity",
+    }
+)
 
 
 def _require_json_value(value: object, path: str) -> None:
@@ -252,7 +259,7 @@ class WorldObject(BaseModel):
         Only allowlisted keys in ``state`` are included.
         The id is the referent (``object_7``), not a name derived from it.
         """
-        data = self.model_dump(mode="json", exclude={"behavior", "velocity"})
+        data = self.model_dump(mode="json", exclude=set(_HIDDEN_OBJECT_FIELDS))
         if data.get("color") is None:
             del data["color"]
         data["state"] = {

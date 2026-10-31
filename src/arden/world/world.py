@@ -28,11 +28,13 @@ from arden.world.physics import (
     Tile,
     TileType,
     _set_active_world,
+    can_bind,
     compute_impulse_delta,
     is_occluded as _is_occluded_helper,
     is_stack_stable,
     max_carry_step,
     object_top_height,
+    should_break_on_strike,
 )
 
 _OBJECT_ID = re.compile(r"^object_[0-9]+$")
@@ -43,6 +45,7 @@ EventType = Literal[
     "object_despawned",
     "object_moved",
     "object_changed",
+    "spoke",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -51,6 +54,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "object_despawned",
         "object_moved",
         "object_changed",
+        "spoke",
         "tick",
     }
 )
@@ -117,6 +121,7 @@ class WorldEvent(BaseModel):
     previous_position: Position | None = None
     changes: dict[str, Any] | None = None
     object: dict[str, Any] | None = None
+    text: str | None = None
 
     @property
     def kind(self) -> EventType:
@@ -127,6 +132,15 @@ class WorldEvent(BaseModel):
     def event_type(self) -> EventType:
         """Alias for ``type``."""
         return self.type
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError as exc:
+            raise KeyError(key) from exc
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
 
 
 class ObjectSpawnedEvent(WorldEvent):
@@ -179,6 +193,13 @@ class TickEvent(WorldEvent):
     """Emitted at the end of each simulation tick."""
 
     type: Literal["tick"] = "tick"
+
+
+class SpokeEvent(WorldEvent):
+    """Emitted when the agent vocalizes via ``speak(text)``."""
+
+    type: Literal["spoke"] = "spoke"
+    text: str
 
 
 EventHandler = Callable[[WorldEvent], None]
@@ -334,6 +355,8 @@ class World:
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
+        self.body_modifiers: Any = None
+        self._opaque_actions: dict[str, dict[str, Callable[..., Any]]] = {}
         self._perception_event_log: list[WorldEvent] = []
         self._has_been_perceived: bool = False
         self.events._internal_listeners.append(self._record_perception_event)
@@ -429,6 +452,7 @@ class World:
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         obj = self.objects.pop(object_id)
+        self._opaque_actions.pop(object_id, None)
         if self.body.holding == object_id:
             self.body.holding = None
         if self.body.level == f"on_top_of:{object_id}":
@@ -604,6 +628,97 @@ class World:
             self.objects[object_id] = obj.model_copy(update={"velocity": new_vel})
         return self.objects[object_id]
 
+    def push(
+        self,
+        object_id: str,
+        direction: Position | Velocity | Mapping[str, Any] | tuple[float, float] | list[float] | str | int | float = (1.0, 0.0),
+        force: float | None = None,
+    ) -> WorldObject:
+        """Push ``object_id`` with ``force`` along ``direction``."""
+        if force is None:
+            if isinstance(direction, int | float) and not isinstance(direction, bool):
+                return self.apply_impulse(object_id, (1.0, 0.0), float(direction))
+            return self.apply_impulse(object_id, direction, 0.5)
+        return self.apply_impulse(object_id, direction, float(force))
+
+    def strike(
+        self,
+        object_id: str,
+        force_or_direction: Any = 0.5,
+        force: float | None = None,
+        *,
+        direction: Any = (1.0, 0.0),
+        source: str = "world",
+    ) -> WorldObject:
+        """Strike ``object_id`` with ``force``; fragile objects break, movable ones receive an impulse."""
+        _set_active_world(self)
+        if object_id not in self.objects:
+            raise KeyError(f"unknown object id: {object_id}")
+
+        if force is None:
+            if isinstance(force_or_direction, int | float) and not isinstance(force_or_direction, bool):
+                force_val = float(force_or_direction)
+                dir_val = direction
+            else:
+                force_val = 0.5
+                dir_val = force_or_direction
+        else:
+            force_val = float(force)
+            dir_val = force_or_direction
+
+        obj = self.objects[object_id]
+        if should_break_on_strike(obj, force_val):
+            new_state = {**obj.state, "broken": True}
+            return self.update_object(object_id, {"state": new_state}, source=source)
+
+        if not obj.fixed and force_val > 0.0:
+            self.apply_impulse(object_id, dir_val, force_val)
+        return self.objects[object_id]
+
+    def bind(
+        self,
+        first_id: str,
+        second_id: str,
+        binder_id: str | None = None,
+        *,
+        source: str = "world",
+    ) -> bool:
+        """Bind ``first_id`` and ``second_id`` using a binding object. Returns True on success."""
+        _set_active_world(self)
+        if first_id not in self.objects:
+            raise KeyError(f"unknown object id: {first_id}")
+        if second_id not in self.objects:
+            raise KeyError(f"unknown object id: {second_id}")
+        if first_id == second_id:
+            raise ValueError("cannot bind an object to itself")
+
+        first = self.objects[first_id]
+        second = self.objects[second_id]
+        if binder_id is not None:
+            if binder_id not in self.objects:
+                raise KeyError(f"unknown object id: {binder_id}")
+            binder = self.objects[binder_id]
+        elif can_bind(first):
+            binder = first
+        elif can_bind(second):
+            binder = second
+        else:
+            return False
+
+        if not can_bind(binder):
+            return False
+
+        first_bound = list(first.state.get("bound_to", []))
+        if second_id not in first_bound:
+            first_bound.append(second_id)
+        second_bound = list(second.state.get("bound_to", []))
+        if first_id not in second_bound:
+            second_bound.append(first_id)
+
+        self.update_object(first_id, {"state": {**first.state, "bound_to": first_bound}}, source=source)
+        self.update_object(second_id, {"state": {**second.state, "bound_to": second_bound}}, source=source)
+        return True
+
     def stack(
         self,
         upper_id: str,
@@ -681,6 +796,45 @@ class World:
         if object_id not in self.objects:
             raise KeyError(f"unknown object id: {object_id}")
         return object_top_height(self.objects[object_id], self.objects, self.terrain)
+
+    def register_opaque_action(
+        self,
+        object_id: str | WorldObject,
+        action_or_handler: str | Callable[..., Any],
+        handler: Callable[..., Any] | None = None,
+    ) -> str:
+        """Register an opaque ``action_<n>`` with a handler on ``object_id``."""
+        from arden.actions.verbs import register_opaque_action as _reg
+
+        return _reg(self, object_id, action_or_handler, handler)
+
+    register_action = register_opaque_action
+
+    def available_opaque_actions(
+        self,
+        *,
+        target: str | WorldObject | None = None,
+        modifiers: Any = None,
+    ) -> list[str]:
+        """Return ``action_<n>`` ids offered by objects currently within reach."""
+        from arden.actions.verbs import available_opaque_actions as _avail
+
+        return _avail(self, target=target, modifiers=modifiers)
+
+    available_actions = available_opaque_actions
+
+    def invoke_opaque_action(
+        self,
+        action_id: str,
+        *args: Any,
+        target: str | WorldObject | None = None,
+        modifiers: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Invoke a registered opaque ``action_<n>`` if its object is within reach."""
+        from arden.actions.verbs import invoke_opaque_action as _invoke
+
+        return _invoke(self, action_id, *args, target=target, modifiers=modifiers, **kwargs)
 
     def _topple_object(
         self,

@@ -14,6 +14,7 @@ from arden.world.objects import (
     ObjectFactory,
     WorldObject,
 )
+from arden.world import World, can_bind, is_stack_stable, should_break_on_strike
 
 _PHYSICAL = {
     "position": {"x": 1.5, "y": -2.0},
@@ -95,6 +96,11 @@ def test_perceptible_omits_hidden_rules_and_human_labels() -> None:
     encoded = json.dumps(view)
 
     assert "behavior" not in view
+    assert "velocity" not in view
+    assert "fragile" not in view
+    assert "fixed" not in view
+    assert "binding" not in view
+    assert "rigidity" not in view
     assert hidden_label not in encoded
     assert "bounce" not in encoded
     assert "scale" not in encoded
@@ -207,3 +213,136 @@ def test_direct_constructor_validates_level_and_inside() -> None:
     assert obj.level == "inside:object_9"
     assert obj.to_json()
     assert WorldObject.from_json(obj.to_json()).level == "inside:object_9"
+
+
+def test_perceptible_hides_effect_revealing_properties_when_set() -> None:
+    obj = ObjectFactory().create(
+        {
+            **_PHYSICAL,
+            "fragile": True,
+            "fixed": True,
+            "binding": True,
+            "rigidity": 0.95,
+            "hollow": True,
+        }
+    )
+    # The fields remain on WorldObject itself
+    assert obj.fragile is True
+    assert obj.fixed is True
+    assert obj.binding is True
+    assert obj.rigidity == 0.95
+    assert obj.hollow is True
+
+    view = obj.perceptible()
+    for hidden_field in ("fragile", "fixed", "binding", "rigidity", "behavior", "velocity"):
+        assert hidden_field not in view
+
+    assert set(view.keys()) == {
+        "id",
+        "position",
+        "level",
+        "shape",
+        "height",
+        "volume",
+        "weight",
+        "hollow",
+        "color",
+        "state",
+    }
+
+
+def test_hidden_properties_still_drive_behavior() -> None:
+    world = World(seed=10)
+
+    # 1. `fixed`: absent from perceptible(), prevents movement when pushed
+    fixed_obj = world.spawn({**_PHYSICAL, "fixed": True}, {"x": 0.0, "y": 0.0})
+    movable_obj = world.spawn({**_PHYSICAL, "fixed": False}, {"x": 0.0, "y": 4.0})
+    assert "fixed" not in fixed_obj.perceptible()
+    assert "fixed" not in movable_obj.perceptible()
+    assert fixed_obj.fixed is True
+    assert movable_obj.fixed is False
+
+    world.push(fixed_obj.id, (1.0, 0.0), 0.8)
+    world.push(movable_obj.id, (1.0, 0.0), 0.8)
+    world.step()
+    assert world.objects[fixed_obj.id].position == Position(x=0.0, y=0.0)
+    assert world.objects[movable_obj.id].position.x > 0.0
+
+    # 2. `fragile`: absent from perceptible(), breaks when struck
+    fragile_obj = world.spawn({**_PHYSICAL, "fragile": True}, {"x": 0.0, "y": 8.0})
+    sturdy_obj = world.spawn({**_PHYSICAL, "fragile": False}, {"x": 0.0, "y": 12.0})
+    assert "fragile" not in fragile_obj.perceptible()
+    assert "fragile" not in sturdy_obj.perceptible()
+    assert fragile_obj.fragile is True
+    assert sturdy_obj.fragile is False
+    assert should_break_on_strike(fragile_obj, 0.5) is True
+    assert should_break_on_strike(sturdy_obj, 0.5) is False
+
+    struck_fragile = world.strike(fragile_obj.id, 0.5)
+    struck_sturdy = world.strike(sturdy_obj.id, 0.5)
+    assert struck_fragile.state.get("broken") is True
+    assert struck_sturdy.state.get("broken") is not True
+
+    # 3. `rigidity`: absent from perceptible(), governs stacking stability
+    flexible_base = world.spawn(
+        {**_PHYSICAL, "shape": "flat", "height": 0.2, "volume": 0.08, "weight": 1.0, "rigidity": 0.1},
+        {"x": 5.0, "y": 0.0},
+    )
+    rigid_base = world.spawn(
+        {**_PHYSICAL, "shape": "flat", "height": 0.2, "volume": 0.08, "weight": 1.0, "rigidity": 0.9},
+        {"x": 5.0, "y": 5.0},
+    )
+    heavy_top_a = world.spawn(
+        {**_PHYSICAL, "shape": "cube", "height": 0.15, "volume": 0.01, "weight": 1.5},
+        {"x": 6.0, "y": 0.0},
+    )
+    heavy_top_b = world.spawn(
+        {**_PHYSICAL, "shape": "cube", "height": 0.15, "volume": 0.01, "weight": 1.5},
+        {"x": 6.0, "y": 5.0},
+    )
+    assert "rigidity" not in flexible_base.perceptible()
+    assert "rigidity" not in rigid_base.perceptible()
+    assert is_stack_stable(heavy_top_a, flexible_base) is False
+    assert is_stack_stable(heavy_top_b, rigid_base) is True
+
+    toppled = world.stack(heavy_top_a.id, flexible_base.id)
+    supported = world.stack(heavy_top_b.id, rigid_base.id)
+    assert toppled.level == "ground"
+    assert supported.level == f"on_top_of:{rigid_base.id}"
+
+    # 4. `binding`: absent from perceptible(), governs whether an object can bind others
+    vine = world.spawn({**_PHYSICAL, "shape": "long", "binding": True}, {"x": -4.0, "y": 0.0})
+    stick = world.spawn({**_PHYSICAL, "shape": "long", "binding": False}, {"x": -4.0, "y": 2.0})
+    stone = world.spawn({**_PHYSICAL, "shape": "flat", "binding": False}, {"x": -4.0, "y": 4.0})
+    assert "binding" not in vine.perceptible()
+    assert "binding" not in stick.perceptible()
+    assert can_bind(vine) is True
+    assert can_bind(stick) is False
+
+    # Binding with a non-binding stick fails; binding with a vine succeeds
+    assert world.bind(stick.id, stone.id, binder_id=stick.id) is False
+    assert world.bind(stick.id, stone.id, binder_id=vine.id) is True
+    assert stone.id in world.objects[stick.id].state["bound_to"]
+    assert stick.id in world.objects[stone.id].state["bound_to"]
+
+
+def test_strike_break_respects_behavior_rule_threshold() -> None:
+    world = World(seed=11)
+    pot = world.spawn(
+        {
+            **_PHYSICAL,
+            "fragile": True,
+            "behavior": [{"verb": "strike", "response": "break", "above_force": 0.7}],
+        },
+        {"x": 0.0, "y": 0.0},
+    )
+    assert "fragile" not in pot.perceptible()
+    assert "behavior" not in pot.perceptible()
+
+    # Strike below threshold does not break it
+    after_light = world.strike(pot.id, 0.4)
+    assert after_light.state.get("broken") is not True
+
+    # Strike at/above threshold breaks it
+    after_hard = world.strike(pot.id, 0.8)
+    assert after_hard.state.get("broken") is True
