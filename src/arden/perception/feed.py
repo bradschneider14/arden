@@ -775,7 +775,17 @@ def perceive(
         reach_radius=reach_radius,
         color_visibility_threshold=color_visibility_threshold,
     )
-    effective_radius = cfg.sensing_radius * vf
+    from arden.environment.body import compute_body_modifiers
+
+    if body is None:
+        w_mods = getattr(world, "body_modifiers", None)
+        if w_mods is not None and hasattr(w_mods, "sensing_radius_scale"):
+            comfort_scale = float(w_mods.sensing_radius_scale)
+        else:
+            comfort_scale = compute_body_modifiers(agent_body, world=world).sensing_radius_scale
+    else:
+        comfort_scale = compute_body_modifiers(agent_body, world=world).sensing_radius_scale
+    effective_radius = cfg.sensing_radius * vf * comfort_scale
 
     perceived_objects: list[PerceivedObject] = []
     affordances = AffordanceMap()

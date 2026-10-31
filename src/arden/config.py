@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from arden.environment.body import BodyConfig, BodySettings
 from arden.environment.daynight import DayNightConfig, DayNightSettings
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -81,6 +82,7 @@ class Settings(BaseModel):
     world: WorldSettings = Field(default_factory=WorldSettings)
     perception: PerceptionSettings = Field(default_factory=PerceptionSettings)
     daynight: DayNightSettings = Field(default_factory=DayNightSettings)
+    body: BodySettings = Field(default_factory=BodySettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
@@ -115,3 +117,19 @@ def make_rng(settings: Settings) -> random.Random:
     so two runs with the same config replay the same sequence.
     """
     return random.Random(settings.world.seed)
+
+
+__all__ = [
+    "DEFAULT_CONFIG_PATH",
+    "BodyConfig",
+    "BodySettings",
+    "DayNightConfig",
+    "DayNightSettings",
+    "LlmSettings",
+    "LoggingSettings",
+    "PerceptionSettings",
+    "Settings",
+    "WorldSettings",
+    "load_config",
+    "make_rng",
+]

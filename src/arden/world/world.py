@@ -12,6 +12,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+from arden.environment.body import (
+    BodyConfig,
+    BodyStateSystem,
+    DriveState,
+    Drives,
+    resolve_body_config,
+)
 from arden.environment.daynight import DayNightConfig, DayNightCycle
 
 from arden.world.objects import (
@@ -390,6 +397,10 @@ class World:
         terrain: TerrainGrid | Mapping[str, Any] | None = None,
         daynight: DayNightCycle | DayNightConfig | Mapping[str, Any] | None = None,
         config: Any = None,
+        body_config: BodyConfig | Mapping[str, Any] | str | None = None,
+        preset: str | None = None,
+        drives: DriveState | Mapping[str, Any] | None = None,
+        weather: Any = "clear",
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -446,7 +457,20 @@ class World:
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
-        self.body_modifiers: Any = None
+        self._manual_body_modifiers: Any = None
+        self.weather: Any = weather
+        self.weather_intensity: float = 1.0
+        self._sheltered_override: float | bool | None = None
+        resolved_body_cfg = (
+            BodyConfig.from_preset(preset)
+            if preset is not None and body_config is None
+            else resolve_body_config(body_config, self)
+        )
+        self._body_state_system: BodyStateSystem = BodyStateSystem(
+            self,
+            config=resolved_body_cfg,
+            drives=drives,
+        )
         self._opaque_actions: dict[str, dict[str, Callable[..., Any]]] = {}
         self._perception_event_log: list[WorldEvent] = []
         self._has_been_perceived: bool = False
@@ -541,6 +565,136 @@ class World:
     def temperature(self) -> float:
         """Alias for ``ambient_temperature``."""
         return self.daynight.ambient_temperature
+
+    @property
+    def body_state(self) -> BodyStateSystem:
+        """Stateful body energy, comfort, side-effect, and drive manager."""
+        return self._body_state_system
+
+    @property
+    def body_config(self) -> BodyConfig:
+        """Current ``BodyConfig`` under ``[body]``."""
+        return self._body_state_system.config
+
+    @body_config.setter
+    def body_config(self, value: BodyConfig | Mapping[str, Any] | str) -> None:
+        self._body_state_system.config = resolve_body_config(value, self)
+
+    @property
+    def drives(self) -> DriveState:
+        """Intrinsic boredom and curiosity drive state."""
+        return self._body_state_system.drives
+
+    @drives.setter
+    def drives(self, value: DriveState | Mapping[str, Any]) -> None:
+        if isinstance(value, DriveState):
+            self._body_state_system.drives = value
+        elif isinstance(value, Mapping):
+            self._body_state_system.drives = DriveState.model_validate(dict(value))
+        else:
+            raise TypeError("drives must be a DriveState or mapping")
+
+    @property
+    def boredom(self) -> float:
+        """Current boredom drive level in ``[0.0, 1.0]``."""
+        return self._body_state_system.drives.boredom
+
+    @boredom.setter
+    def boredom(self, value: float) -> None:
+        self._body_state_system.drives.boredom = max(0.0, min(1.0, float(value)))
+
+    @property
+    def curiosity(self) -> float:
+        """Current accumulated curiosity reward."""
+        return self._body_state_system.drives.curiosity
+
+    @curiosity.setter
+    def curiosity(self, value: float) -> None:
+        self._body_state_system.drives.curiosity = max(0.0, float(value))
+
+    @property
+    def curiosity_reward(self) -> float:
+        """Alias for ``curiosity``."""
+        return self._body_state_system.drives.curiosity
+
+    @curiosity_reward.setter
+    def curiosity_reward(self, value: float) -> None:
+        self._body_state_system.drives.curiosity = max(0.0, float(value))
+
+    @property
+    def body_modifiers(self) -> Any:
+        """Current ``BodyModifiers`` derived from energy, comfort, cold, and wet."""
+        if self._manual_body_modifiers is not None:
+            return self._manual_body_modifiers
+        return self._body_state_system.modifiers
+
+    @body_modifiers.setter
+    def body_modifiers(self, value: Any) -> None:
+        self._manual_body_modifiers = value
+
+    @property
+    def modifiers(self) -> Any:
+        """Alias for ``body_modifiers``."""
+        return self.body_modifiers
+
+    @property
+    def wet(self) -> float:
+        """Current agent wetness level in ``[0.0, 1.0]``."""
+        return self._body_state_system.wet
+
+    @wet.setter
+    def wet(self, value: float | bool | None) -> None:
+        self._body_state_system.wet = value
+
+    @property
+    def cold(self) -> float:
+        """Current agent cold exposure level in ``[0.0, 1.0]``."""
+        return self._body_state_system.cold
+
+    @cold.setter
+    def cold(self, value: float | bool | None) -> None:
+        self._body_state_system.cold = value
+
+    @property
+    def sheltered(self) -> float:
+        """Current shelter level in ``[0.0, 1.0]``."""
+        return self._body_state_system.current_shelter_level()
+
+    @sheltered.setter
+    def sheltered(self, value: float | bool | None) -> None:
+        self._sheltered_override = value
+
+    @property
+    def memory_salience(self) -> float:
+        """Current episodic memory salience score from drives and body state."""
+        return self._body_state_system.memory_salience
+
+    def gate_triggers(self) -> list[str]:
+        """Return drive/body triggers currently exceeding gate wake thresholds."""
+        return self._body_state_system.gate_triggers()
+
+    @property
+    def should_wake_gate(self) -> bool:
+        """Return True if any drive or body threshold warrants waking the LLM."""
+        return self._body_state_system.should_wake_gate
+
+    def record_activity(
+        self,
+        verb: str,
+        *,
+        force: float | None = None,
+        speed: float | None = None,
+    ) -> float:
+        """Drain energy immediately for an executed action, weighted by ``verb`` and ``force``."""
+        return self._body_state_system.record_activity(verb, force=force, speed=speed)
+
+    def rest(self, ticks: int = 1) -> tuple[float, float]:
+        """Restore energy and comfort via rest (idle). Returns ``(energy, comfort)``."""
+        return self._body_state_system.rest(ticks)
+
+    def eat(self, target: str | WorldObject | None = None) -> Any:
+        """Eat an object with an ``edible`` rule within reach to restore energy."""
+        return self._body_state_system.eat(target)
 
     def set_time_of_day(
         self,
@@ -1778,7 +1932,24 @@ class World:
                     )
                 )
 
-    def step(self) -> int:
+    def step(
+        self,
+        *,
+        verb: str | None = None,
+        force: float | None = None,
+        speed: float | None = None,
+        resting: bool | None = None,
+        cold: float | bool | None = None,
+        wet: float | bool | None = None,
+        storm: float | bool | None = None,
+        sheltered: float | bool | None = None,
+        dry: bool | None = None,
+        warm: float | bool | None = None,
+        temperature: float | None = None,
+        weather: Any = None,
+        novelty: float | int | bool = 0.0,
+        surprise: float | int | bool = 0.0,
+    ) -> int:
         """Advance the simulation by exactly one tick."""
         _set_active_world(self)
         self.tick += 1
@@ -1787,6 +1958,22 @@ class World:
         self.rng.random()
         self.daynight.step(1)
         self._step_physics()
+        self._body_state_system.step(
+            verb=verb,
+            force=force,
+            speed=speed,
+            resting=resting,
+            cold=cold,
+            wet=wet,
+            storm=storm,
+            sheltered=sheltered,
+            dry=dry,
+            warm=warm,
+            temperature=temperature,
+            weather=weather,
+            novelty=novelty,
+            surprise=surprise,
+        )
         self.events.emit(TickEvent(tick=self.tick, source="world"))
         return self.tick
 
@@ -1802,6 +1989,8 @@ class World:
             },
             "terrain": self.terrain.to_dict(),
             "daynight": self.daynight.to_dict(),
+            "body_state": self._body_state_system.to_dict(),
+            "weather": self.weather,
             "factory": {
                 "next": self._factory._next,
                 "used": sorted(self._factory._used),
@@ -1879,6 +2068,13 @@ class World:
         self.objects = restored_objects
         self.terrain = terrain
         self.daynight = daynight
+        raw_body_state = raw.get("body_state")
+        if isinstance(raw_body_state, Mapping):
+            self._body_state_system = BodyStateSystem.from_dict(raw_body_state, world=self)
+        else:
+            self._body_state_system = BodyStateSystem(self, config=self.body_config)
+        if "weather" in raw:
+            self.weather = raw["weather"]
         self._factory = factory
         _set_active_world(self)
         return self

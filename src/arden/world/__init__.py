@@ -1,5 +1,16 @@
 """World simulation types shared by the sim, perception, and the web client."""
 
+from arden.environment.body import (
+    BodyConfig,
+    BodySettings,
+    BodyStateModel,
+    BodyStateSystem,
+    DriveState,
+    DriveThresholds,
+    Drives,
+    compute_body_modifiers,
+    compute_memory_salience,
+)
 from arden.world.clock import Clock, WorldClock
 from arden.world.objects import (
     PERCEPTIBLE_STATE_KEYS,
@@ -64,11 +75,18 @@ __all__ = [
     "TILE_TYPES",
     "AgentBody",
     "BehaviorRule",
+    "BodyConfig",
+    "BodySettings",
+    "BodyStateModel",
+    "BodyStateSystem",
     "CenterOfMass",
     "Clock",
     "CycleFreezeEvent",
     "CycleFrozenEvent",
     "Composite",
+    "DriveState",
+    "DriveThresholds",
+    "Drives",
     "EventBus",
     "EventType",
     "ObjectChangedEvent",
@@ -91,10 +109,12 @@ __all__ = [
     "WorldObject",
     "apply_impulse",
     "can_bind",
+    "compute_body_modifiers",
     "compute_center_of_mass",
     "compute_composite_rigidity",
     "compute_composite_shape",
     "compute_joint_strength",
+    "compute_memory_salience",
     "compute_stack_stability",
     "compute_strike_force",
     "extract_original_parts",
