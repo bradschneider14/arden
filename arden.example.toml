@@ -17,8 +17,18 @@ move_threshold = 0.1
 color_visibility_threshold = 0.75
 
 [llm]
-# "mock" is the only backend implemented so far.
+# Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"
+# OpenAI-compatible base URL (Ollama /v1 or llama.cpp server).
+base_url = "http://127.0.0.1:11434/v1"
+# Model identifier for the local backend.
+model = "qwen2.5:7b-instruct"
+# Sampling temperature for structured generation.
+temperature = 0.2
+# Default HTTP timeout in seconds for a single LLM request.
+timeout_s = 30.0
+# Number of repair retries when the LLM returns invalid JSON or fails schema validation.
+max_retries = 2
 
 [logging]
 # Process log level. Separate from the observer log.

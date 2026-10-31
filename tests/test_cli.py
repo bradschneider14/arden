@@ -70,3 +70,16 @@ def test_run_passes_seeded_rng(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
 def test_run_simulation_placeholder_prints_message(capsys: pytest.CaptureFixture[str]) -> None:
     run_simulation(Settings(), make_rng(Settings()))
     assert capsys.readouterr().out.strip() == "not implemented yet"
+
+
+def test_llm_smoke_with_mock_backend_prints_intent_and_latency(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / "arden.toml"
+    config_path.write_text('[llm]\nbackend = "mock"\n', encoding="utf-8")
+    code = main(["llm-smoke", "--config", str(config_path)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "backend: mock" in out
+    assert "latency_ms:" in out
+    assert "intent:" in out
