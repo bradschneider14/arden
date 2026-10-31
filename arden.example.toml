@@ -28,6 +28,49 @@ temperature_swing = 0.4
 # Peak daytime ambient temperature at noon.
 base_temperature = 1.0
 
+[body]
+# Preset for body side-effect strengths and drain rates: "default", "gentle", or "harsh".
+preset = "default"
+# Passive per-tick energy drain.
+energy_time_drain = 0.002
+# Base energy drain per active verb (scaled by verb weight and force).
+energy_activity_drain = 0.02
+# Per-tick energy restored while resting (idle).
+energy_rest_recovery = 0.015
+# Default energy restored when eating an object with an edible rule.
+edible_energy_restore = 0.15
+# Energy level below which gradual speed and force side effects begin.
+low_energy_effect_threshold = 0.95
+# Per-tick comfort drain from cold, wet, night, storm, and low energy.
+comfort_cold_drain = 0.018
+comfort_wet_drain = 0.018
+comfort_night_drain = 0.012
+comfort_storm_drain = 0.028
+comfort_low_energy_drain = 0.02
+# Per-tick comfort recovery from shelter, dryness, warmth, and rest.
+comfort_shelter_recovery = 0.015
+comfort_dry_recovery = 0.005
+comfort_warm_recovery = 0.006
+comfort_rest_recovery = 0.015
+# Physical side-effect strengths (low energy -> speed/force, cold -> grab/bind, wet -> speed/slip, low comfort -> sensing).
+low_energy_speed_effect = 0.4
+low_energy_force_effect = 0.45
+cold_grab_fail_effect = 0.35
+cold_bind_fail_effect = 0.35
+wet_speed_effect = 0.2
+wet_slip_effect = 0.25
+low_comfort_sensing_effect = 0.4
+very_low_comfort_threshold = 0.35
+# Intrinsic drive rates and attention-gate wake thresholds.
+boredom_rise_rate = 0.02
+boredom_drop_scale = 0.5
+curiosity_novelty_weight = 0.3
+curiosity_surprise_weight = 0.5
+low_energy_wake_threshold = 0.25
+low_comfort_wake_threshold = 0.25
+boredom_wake_threshold = 0.7
+curiosity_wake_threshold = 0.6
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"

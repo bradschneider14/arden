@@ -91,8 +91,49 @@ class BodyModifiers(BaseModel):
     force: float = Field(default=1.0, ge=0.0)
     dexterity: float = Field(default=1.0, ge=0.0)
     grab_fail_chance: float = Field(default=0.0, ge=0.0, le=1.0)
+    bind_fail_chance: float = Field(default=0.0, ge=0.0, le=1.0)
+    slip_chance: float = Field(default=0.0, ge=0.0, le=1.0)
+    sensing_radius_scale: float = Field(default=1.0, ge=0.0, le=1.0)
 
-    @field_validator("speed", "force", "dexterity", "grab_fail_chance")
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_modifier_aliases(cls, values: Any) -> Any:
+        if not isinstance(values, Mapping):
+            return values
+        d = dict(values)
+        if "slip_chance" not in d and "held_slip_chance" in d:
+            d["slip_chance"] = d.pop("held_slip_chance")
+        if "sensing_radius_scale" not in d:
+            if "sensing_scale" in d:
+                d["sensing_radius_scale"] = d.pop("sensing_scale")
+            elif "visibility_scale" in d:
+                d["sensing_radius_scale"] = d.pop("visibility_scale")
+        return d
+
+    @property
+    def held_slip_chance(self) -> float:
+        """Alias for ``slip_chance``."""
+        return self.slip_chance
+
+    @property
+    def sensing_scale(self) -> float:
+        """Alias for ``sensing_radius_scale``."""
+        return self.sensing_radius_scale
+
+    @property
+    def visibility_scale(self) -> float:
+        """Alias for ``sensing_radius_scale``."""
+        return self.sensing_radius_scale
+
+    @field_validator(
+        "speed",
+        "force",
+        "dexterity",
+        "grab_fail_chance",
+        "bind_fail_chance",
+        "slip_chance",
+        "sensing_radius_scale",
+    )
     @classmethod
     def _values_are_finite(cls, value: float) -> float:
         if not math.isfinite(value):
@@ -274,6 +315,18 @@ def _resolve_modifiers(
     if isinstance(body_mods, Mapping):
         return BodyModifiers.model_validate(dict(body_mods))
     return BodyModifiers()
+
+
+def _record_verb_activity(
+    world: World,
+    verb: str,
+    *,
+    force: float | None = None,
+    speed: float | None = None,
+) -> None:
+    rec = getattr(world, "record_activity", None)
+    if callable(rec):
+        rec(verb, force=force, speed=speed)
 
 
 def _validate_unit_interval(value: Any) -> float | None:
@@ -696,6 +749,14 @@ def move(
         if not resolved_world.move_agent(dest):
             return ActionResult(ok=False, reason=OUT_OF_REACH)
 
+        _record_verb_activity(resolved_world, "move", speed=valid_speed)
+        slipped_id: str | None = None
+        held_id = resolved_world.body.holding
+        if held_id is not None and held_id in resolved_world.objects and mods.slip_chance > 0.0:
+            if resolved_world.rng.random() < mods.slip_chance:
+                drop_res = drop(resolved_world, held_id, modifiers=mods)
+                if drop_res.ok:
+                    slipped_id = held_id
         # Keep held item (and anything inside it) moving with the agent body
         held_id = resolved_world.body.holding
         if held_id is not None and held_id in resolved_world.objects:
@@ -735,6 +796,11 @@ def move(
             "previous_position": {"x": prev_pos.x, "y": prev_pos.y},
             "position": {"x": dest.x, "y": dest.y},
             "level": resolved_world.body.level,
+            **(
+                {"slipped": slipped_id}
+                if slipped_id is not None
+                else {}
+            ),
         },
     )
 
@@ -776,6 +842,7 @@ def look(
                 _apply_rule_state_updates(resolved_world, target_obj, rule)
         refreshed = resolved_world.objects.get(target_obj.id, target_obj)
         perceptible = refreshed.perceptible()
+        _record_verb_activity(resolved_world, "look")
     finally:
         unsub()
 
@@ -822,6 +889,7 @@ def push(
     if effective_force <= 0.0:
         return ActionResult(ok=False, reason=NOTHING_HAPPENED)
 
+    _record_verb_activity(resolved_world, "push", force=valid_force)
     push_rules = [r for r in target_obj.behavior if r.verb == "push"]
 
     # Check if any push rule explicitly blocks or requires higher force
@@ -968,6 +1036,7 @@ def strike(
     else:
         strike_dir = _direction_from_agent_to_object(resolved_world, target_obj)
 
+    _record_verb_activity(resolved_world, "strike", force=valid_force)
     tool_mult = strike_impact_multiplier(tool_obj)
     effective_impact = compute_strike_force(effective_force, tool_obj)
 
@@ -1214,6 +1283,7 @@ def grab(
     if target_obj.fixed or target_obj.weight > max_weight:
         return ActionResult(ok=False, reason=TOO_HEAVY)
 
+    _record_verb_activity(resolved_world, "grab")
     # Check grab failure probability from grab_fail_chance and dexterity
     clamped_fail = max(0.0, min(1.0, mods.grab_fail_chance))
     clamped_dex = max(0.0, min(1.0, mods.dexterity))
@@ -1370,6 +1440,7 @@ def drop(
             )
         )
 
+        _record_verb_activity(resolved_world, "drop")
         drop_rules = [r for r in updated_obj.behavior if r.verb == "drop"]
         for rule in drop_rules:
             extras = _rule_extras(rule)
@@ -1479,6 +1550,7 @@ def place(
             )
         )
 
+        _record_verb_activity(resolved_world, "place")
         place_rules = [r for r in updated_obj.behavior if r.verb == "place"]
         for rule in place_rules:
             _apply_rule_state_updates(resolved_world, updated_obj, rule)
@@ -1570,6 +1642,7 @@ def stack(
         if held_obj.level.startswith("inside:"):
             _detach_from_container(resolved_world, held_obj)
 
+        _record_verb_activity(resolved_world, "stack")
         support_id = resolved_world._top_of_stack(target_obj.id, exclude_id=held_obj.id)
         support_obj = resolved_world.objects[support_id]
         score = stack_stability_score(held_obj, support_obj, resolved_world.objects)
@@ -1690,11 +1763,19 @@ def bind(
     if held_obj.fixed or target_obj.fixed or binder_obj.fixed:
         return ActionResult(ok=False, reason=TOO_HEAVY)
 
-    # Dexterity check (cold reduces dexterity so binds can fail)
+    _record_verb_activity(resolved_world, "bind")
+    # Dexterity check (cold reduces dexterity and raises bind_fail_chance so binds can fail)
+    clamped_bind_fail = max(0.0, min(1.0, mods.bind_fail_chance))
+    clamped_dex = max(0.0, min(1.0, mods.dexterity))
+    bind_fail_prob = max(clamped_bind_fail, 1.0 - clamped_dex)
+    if bind_fail_prob >= 1.0:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+    if bind_fail_prob > 0.0 and resolved_world.rng.random() < bind_fail_prob:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
     clamped_dex = max(0.0, min(1.0, mods.dexterity))
     if clamped_dex <= 0.0:
         return ActionResult(ok=False, reason=NOTHING_HAPPENED)
-    if clamped_dex < 1.0 and resolved_world.rng.random() < (1.0 - clamped_dex):
+    if False and clamped_dex < 1.0 and resolved_world.rng.random() < (1.0 - clamped_dex):
         return ActionResult(ok=False, reason=NOTHING_HAPPENED)
 
     was_holding = resolved_world.body.holding in (held_obj.id, target_obj.id, binder_obj.id)
@@ -1908,6 +1989,7 @@ def insert(
             )
         )
 
+        _record_verb_activity(resolved_world, "insert")
         # Upgrade container to a Composite whose weight includes its contents
         refreshed_target = resolved_world.objects[target_obj.id]
         if isinstance(refreshed_target, Composite) and refreshed_target.base_object is not None:
@@ -2000,6 +2082,7 @@ def separate(
     captured: list[WorldEvent] = []
     unsub = resolved_world.subscribe(captured.append)
     try:
+        _record_verb_activity(resolved_world, "separate")
         # Case 1: Bound Composite
         if isinstance(target_obj, Composite) and target_obj.join_type == "bind" and target_obj.parts:
             restored = _separate_bound_composite(resolved_world, target_obj, source="agent")
@@ -2166,6 +2249,16 @@ def speak(
                 position=resolved_world.body.position.model_copy(),
             )
         )
+        _record_verb_activity(resolved_world, "speak")
+        if False:
+            resolved_world.events.emit(
+                SpokeEvent(
+                    tick=resolved_world.tick,
+                    source="agent",
+                    text=actual_text,
+                position=resolved_world.body.position.model_copy(),
+            )
+        )
     finally:
         unsub()
 
@@ -2245,6 +2338,18 @@ def _object_opaque_actions(world: World, obj: WorldObject) -> dict[str, OpaqueHa
         actions.update(reg[obj.id])
     for rule in obj.behavior:
         if _OPAQUE_ACTION_ID.fullmatch(rule.verb) and rule.verb not in actions:
+            actions[rule.verb] = None
+        elif rule.verb in ("edible", "eat"):
+            extras = rule.__pydantic_extra__ or {}
+            explicit_id = next(
+                (
+                    str(extras[k])
+                    for k in ("action", "action_id", "opaque_id", "opaque_action")
+                    if isinstance(extras.get(k), str) and _OPAQUE_ACTION_ID.fullmatch(str(extras[k]))
+                ),
+                "action_1",
+            )
+            actions.setdefault(explicit_id, None)
             actions[rule.verb] = None
     return actions
 
@@ -2394,6 +2499,7 @@ def invoke_opaque_action(
                 _apply_rule_state_updates(resolved_world, provider_obj, rule)
 
         if handler is not None:
+            _record_verb_activity(resolved_world, action_id)
             outcome = _invoke_handler(handler, resolved_world, provider_obj, call_args, kwargs)
             if isinstance(outcome, ActionResult):
                 merged_events = list(captured)
@@ -2417,6 +2523,21 @@ def invoke_opaque_action(
             elif outcome is not None:
                 data_payload["result"] = outcome
             return ActionResult(ok=True, reason=None, events=captured, data=data_payload)
+        from arden.environment.body import eat_object, is_edible_object
+
+        if is_edible_object(provider_obj):
+            eat_res = eat_object(resolved_world, provider_obj)
+            merged_ev = list(captured)
+            for ev in eat_res.events:
+                if ev not in merged_ev:
+                    merged_ev.append(ev)
+            return eat_res.model_copy(
+                update={
+                    "events": merged_ev,
+                    "data": {"action": action_id, **eat_res.data},
+                }
+            )
+        _record_verb_activity(resolved_world, action_id)
     finally:
         unsub()
 
@@ -2431,6 +2552,64 @@ def invoke_opaque_action(
 execute_opaque_action = invoke_opaque_action
 run_opaque_action = invoke_opaque_action
 opaque_action = invoke_opaque_action
+
+
+def eat(
+    world_or_target: World | str | WorldObject | None = None,
+    target: str | WorldObject | None = None,
+    *,
+    world: World | None = None,
+    modifiers: BodyModifiers | Mapping[str, Any] | None = None,
+) -> ActionResult:
+    """Eat an object with an ``edible`` rule within reach to restore energy."""
+    from arden.environment.body import eat_object
+
+    if isinstance(world_or_target, World):
+        resolved_world = _resolve_world(world_or_target)
+        actual_target = target
+    else:
+        resolved_world = _resolve_world(world)
+        actual_target = world_or_target if world_or_target is not None else target
+
+    _ = _resolve_modifiers(resolved_world, modifiers)
+    return eat_object(resolved_world, actual_target)
+
+
+def rest(
+    world_or_ticks: World | int | None = None,
+    ticks: int = 1,
+    *,
+    world: World | None = None,
+) -> ActionResult:
+    """Rest (idle) for ``ticks`` to restore energy and comfort."""
+    if isinstance(world_or_ticks, World):
+        resolved_world = _resolve_world(world_or_ticks)
+        actual_ticks = ticks
+    elif isinstance(world_or_ticks, int) and not isinstance(world_or_ticks, bool):
+        resolved_world = _resolve_world(world)
+        actual_ticks = world_or_ticks
+    else:
+        resolved_world = _resolve_world(world)
+        actual_ticks = ticks
+
+    if not isinstance(actual_ticks, int) or isinstance(actual_ticks, bool) or actual_ticks < 1:
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+
+    prev_energy = resolved_world.body.energy
+    prev_comfort = resolved_world.body.comfort
+    new_energy, new_comfort = resolved_world.rest(actual_ticks)
+    return ActionResult(
+        ok=True,
+        reason=None,
+        events=[],
+        data={
+            "ticks": actual_ticks,
+            "previous_energy": prev_energy,
+            "energy": new_energy,
+            "previous_comfort": prev_comfort,
+            "comfort": new_comfort,
+        },
+    )
 
 
 def execute_action(
@@ -2500,6 +2679,15 @@ def execute_action(
     if verb == "separate":
         tgt = actual_target if actual_target is not None else actual_params.get("target")
         return separate(resolved_world, tgt, modifiers=modifiers)
+    if verb in ("eat", "edible"):
+        tgt = actual_target if actual_target is not None else actual_params.get("target")
+        return eat(resolved_world, tgt, modifiers=modifiers)
+    if verb in ("rest", "idle"):
+        ticks_val = actual_params.get(
+            "ticks",
+            actual_target if isinstance(actual_target, int) and not isinstance(actual_target, bool) else 1,
+        )
+        return rest(resolved_world, ticks_val)
     if verb == "speak":
         text = actual_params.get("text", actual_target)
         return speak(resolved_world, text, modifiers=modifiers)
@@ -2535,6 +2723,8 @@ __all__ = [
     "available_opaque_actions",
     "bind",
     "drop",
+    "eat",
+    "execute_action",
     "execute_action",
     "execute_opaque_action",
     "get_opaque_actions",
@@ -2550,6 +2740,8 @@ __all__ = [
     "push",
     "register_action",
     "register_opaque_action",
+    "rest",
+    "run_opaque_action",
     "run_opaque_action",
     "separate",
     "speak",
