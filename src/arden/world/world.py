@@ -91,6 +91,7 @@ EventType = Literal[
     "time_of_day_changed",
     "cycle_frozen",
     "weather_changed",
+    "intent_ended",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -103,6 +104,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "time_of_day_changed",
         "cycle_frozen",
         "weather_changed",
+        "intent_ended",
         "tick",
     }
 )
@@ -342,6 +344,65 @@ class WeatherChangedEvent(WorldEvent):
 WeatherEvent = WeatherChangedEvent
 
 
+class IntentEndedEvent(WorldEvent):
+    """Emitted when the low-level controller finishes or fails an Intent."""
+
+    type: Literal["intent_ended"] = "intent_ended"
+    source: str = "controller"
+    status: Literal["succeeded", "failed"] = "succeeded"
+    ok: bool = True
+    intent: Any = None
+    goal: str | None = None
+    expect: str | None = None
+    confidence: float | None = None
+    reason: str | None = None
+    step: Any = None
+    step_index: int | None = None
+    retries: int = 0
+    observation: Any = None
+    result: Any = None
+
+    @property
+    def succeeded(self) -> bool:
+        """Return True when the intent completed all steps."""
+        return self.status == "succeeded"
+
+    @property
+    def failed(self) -> bool:
+        """Return True when the intent stopped because a step failed."""
+        return self.status == "failed"
+
+    @property
+    def success(self) -> bool:
+        """Alias for ``succeeded``."""
+        return self.succeeded
+
+    @property
+    def reason_code(self) -> str | None:
+        """Alias for ``reason``."""
+        return self.reason
+
+    @property
+    def failed_step(self) -> Any:
+        """Return the failed step if the intent failed, else None."""
+        return self.step if self.failed else None
+
+    @property
+    def percept(self) -> Any:
+        """Alias for ``observation``."""
+        return self.observation
+
+    @property
+    def final_observation(self) -> Any:
+        """Alias for ``observation``."""
+        return self.observation
+
+    @property
+    def outcome(self) -> Literal["succeeded", "failed"]:
+        """Alias for ``status``."""
+        return self.status
+
+
 EventHandler = Callable[[WorldEvent], None]
 
 
@@ -457,12 +518,11 @@ class World:
         | None = None,
         terrain: TerrainGrid | Mapping[str, Any] | None = None,
         daynight: DayNightCycle | DayNightConfig | Mapping[str, Any] | None = None,
-        weather: WeatherSystem | WeatherConfig | Mapping[str, Any] | None = None,
+        weather: WeatherSystem | WeatherConfig | Mapping[str, Any] | str | None = None,
         config: Any = None,
         body_config: BodyConfig | Mapping[str, Any] | str | None = None,
         preset: str | None = None,
         drives: DriveState | Mapping[str, Any] | None = None,
-        weather: Any = "clear",
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -520,13 +580,23 @@ class World:
             if w_cfg is not None:
                 weather = w_cfg
 
+        default_w_seed = (
+            seed
+            if seed is not None
+            else (rng if isinstance(rng, int) and not isinstance(rng, bool) else 0)
+        )
         if weather is None:
-            default_w_seed = (
-                seed
-                if seed is not None
-                else (rng if isinstance(rng, int) and not isinstance(rng, bool) else 0)
-            )
             self.weather: WeatherSystem = WeatherSystem(seed=default_w_seed)
+        elif isinstance(weather, str):
+            self.weather = WeatherSystem(seed=default_w_seed)
+            w_type = weather.strip().lower()
+            if w_type and w_type != "clear":
+                self.weather.set_weather(
+                    w_type,  # type: ignore[arg-type]
+                    intensity=1.0,
+                    duration=1_000_000,
+                    current_tick=0,
+                )
         elif isinstance(weather, WeatherSystem):
             self.weather = WeatherSystem.from_dict(weather.to_dict())
         elif isinstance(weather, WeatherConfig):
@@ -537,7 +607,7 @@ class World:
             else:
                 self.weather = WeatherSystem(config=weather)
         else:
-            raise TypeError("weather must be a WeatherSystem, WeatherConfig, mapping, or None")
+            raise TypeError("weather must be a WeatherSystem, WeatherConfig, mapping, str, or None")
         self.weather._bind_world(self)
 
         self.tick: int = 0
@@ -545,8 +615,6 @@ class World:
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
         self._manual_body_modifiers: Any = None
-        self.weather: Any = weather
-        self.weather_intensity: float = 1.0
         self._sheltered_override: float | bool | None = None
         resolved_body_cfg = (
             BodyConfig.from_preset(preset)
@@ -582,7 +650,7 @@ class World:
         _set_active_world(self)
 
     def _record_perception_event(self, event: WorldEvent) -> None:
-        if event.type == "tick":
+        if event.type in ("tick", "intent_ended"):
             return
         if event.type == "object_spawned" and not self._has_been_perceived:
             return

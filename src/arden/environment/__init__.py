@@ -86,15 +86,11 @@ from arden.environment.weather import (
 )
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Any:
     if name in ("WeatherChangedEvent", "WeatherEvent"):
         from arden.world.world import WeatherChangedEvent, WeatherEvent
 
         return WeatherChangedEvent if name == "WeatherChangedEvent" else WeatherEvent
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __getattr__(name: str) -> Any:
     if name == "BodyModifiers":
         from arden.actions.verbs import BodyModifiers
 
@@ -144,7 +140,7 @@ __all__ = [
     "BodyModifiers",
     "BodySettings",
     "BodyStateModel",
-    "BodyStateSystem"
+    "BodyStateSystem",
     "DayNightConfig",
     "DayNightCycle",
     "DayNightSettings",
