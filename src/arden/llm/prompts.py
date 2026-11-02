@@ -12,16 +12,21 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
 from arden.actions.verbs import ActionResult
 from arden.llm.base import require_role
 from arden.llm.schemas import VERBS
+
 if False: from arden.perception.feed import BodyPercept, PerceivedObject, Percept
+
 from arden.world.objects import Position, WorldObject
 from arden.world.world import AgentBody
+
+if TYPE_CHECKING:
+    from arden.perception.feed import BodyPercept, PerceivedObject, Percept
 
 DEFAULT_MAX_TOKENS = 1024
 
@@ -103,6 +108,8 @@ def format_body_state(
     body_state: BodyPercept | AgentBody | Mapping[str, Any] | str | None,
 ) -> str:
     """Format body state as plain numbers and ids, with no evaluative words."""
+    from arden.perception.feed import BodyPercept
+
     if body_state is None:
         return "none"
     if isinstance(body_state, str):
@@ -139,6 +146,8 @@ def format_body_state(
 
 def format_percept(percept: Percept | PerceivedObject | str | None) -> str:
     """Format percept delta text without duplicating or labeling semantics."""
+    from arden.perception.feed import PerceivedObject, Percept
+
     if percept is None:
         return "none"
     from arden.perception.feed import PerceivedObject, Percept
@@ -253,6 +262,7 @@ def build_prompt(
         raise ValueError("max_tokens must be > 0")
 
     from arden.perception.feed import PerceivedObject, Percept
+
     if body_state is None and isinstance(percept, Percept):
         body_state = percept.body
 
