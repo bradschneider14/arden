@@ -11,7 +11,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from arden.world.objects import ObjectFactory, Position, Velocity, WorldObject, object_radius
+
+from arden.environment.daynight import DayNightConfig, DayNightCycle
+
+from arden.world.objects import (
+    Composite,
+    ObjectFactory,
+    Position,
+    Velocity,
+    WorldObject,
+    object_radius,
+    validate_world_object,
+)
+
 from arden.world.physics import (
     COLLISION_ITERATIONS,
     COLLISION_RESTITUTION,
@@ -31,11 +43,13 @@ from arden.world.physics import (
     _set_active_world,
     can_bind,
     compute_impulse_delta,
+    compute_strike_force,
     is_occluded as _is_occluded_helper,
     is_stack_stable,
     max_carry_step,
     object_top_height,
     should_break_on_strike,
+    stack_stability_score,
 )
 
 _OBJECT_ID = re.compile(r"^object_[0-9]+$")
@@ -47,6 +61,8 @@ EventType = Literal[
     "object_moved",
     "object_changed",
     "spoke",
+    "time_of_day_changed",
+    "cycle_frozen",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -56,9 +72,19 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "object_moved",
         "object_changed",
         "spoke",
+        "time_of_day_changed",
+        "cycle_frozen",
         "tick",
     }
 )
+_EVENT_TYPE_ALIASES: dict[str, str] = {
+    "time_of_day_set": "time_of_day_changed",
+    "set_time_of_day": "time_of_day_changed",
+    "time_changed": "time_of_day_changed",
+    "freeze_cycle": "cycle_frozen",
+    "cycle_freeze_changed": "cycle_frozen",
+    "daynight_frozen": "cycle_frozen",
+}
 
 
 def _coerce_position(pos: Position | Mapping[str, Any] | tuple[float, float] | list[float]) -> Position:
@@ -124,6 +150,11 @@ class WorldEvent(BaseModel):
     changes: dict[str, Any] | None = None
     object: dict[str, Any] | None = None
     text: str | None = None
+    time_of_day: float | None = None
+    previous_time_of_day: float | None = None
+    frozen: bool | None = None
+    light_level: float | None = None
+    ambient_temperature: float | None = None
 
     @property
     def kind(self) -> EventType:
@@ -204,6 +235,47 @@ class SpokeEvent(WorldEvent):
     text: str
 
 
+class TimeOfDayChangedEvent(WorldEvent):
+    """Emitted when the creator sets the world's time of day directly."""
+
+    type: Literal["time_of_day_changed"] = "time_of_day_changed"
+    source: str = "creator"
+    previous_time_of_day: float
+    time_of_day: float
+    light_level: float
+    ambient_temperature: float
+
+    @property
+    def fraction(self) -> float:
+        """Alias for ``time_of_day``."""
+        return self.time_of_day
+
+    @property
+    def light(self) -> float:
+        """Alias for ``light_level``."""
+        return self.light_level
+
+    @property
+    def temperature(self) -> float:
+        """Alias for ``ambient_temperature``."""
+        return self.ambient_temperature
+
+
+TimeOfDayEvent = TimeOfDayChangedEvent
+
+
+class CycleFrozenEvent(WorldEvent):
+    """Emitted when the creator freezes or unfreezes the day/night cycle."""
+
+    type: Literal["cycle_frozen"] = "cycle_frozen"
+    source: str = "creator"
+    frozen: bool
+    time_of_day: float
+
+
+CycleFreezeEvent = CycleFrozenEvent
+
+
 EventHandler = Callable[[WorldEvent], None]
 
 
@@ -224,12 +296,7 @@ class EventBus:
         *,
         event_type: EventType | None = None,
     ) -> Callable[[], None]:
-        """Register a subscriber for all events or a specific event type.
-
-        Supports both ``subscribe(callback)``, ``subscribe("tick", callback)``,
-        and ``subscribe(callback, event_type="tick")``. Returns an unsubscribe
-        callable.
-        """
+        """Register a subscriber for all events or a specific event type."""
         if isinstance(handler_or_type, str):
             if handler is None or not callable(handler):
                 raise TypeError("handler must be callable when event_type is given first")
@@ -244,6 +311,7 @@ class EventBus:
             raise TypeError("subscribe expects a callable handler or (event_type, handler)")
 
         if target_type is not None:
+            target_type = _EVENT_TYPE_ALIASES.get(target_type, target_type)
             if target_type not in EVENT_TYPES:
                 allowed = ", ".join(sorted(EVENT_TYPES))
                 raise ValueError(f"unknown event type {target_type!r}; expected one of: {allowed}")
@@ -271,10 +339,11 @@ class EventBus:
     ) -> None:
         """Remove a previously registered handler."""
         if event_type is not None:
-            if event_type not in EVENT_TYPES:
+            resolved_type = _EVENT_TYPE_ALIASES.get(event_type, event_type)
+            if resolved_type not in EVENT_TYPES:
                 allowed = ", ".join(sorted(EVENT_TYPES))
                 raise ValueError(f"unknown event type {event_type!r}; expected one of: {allowed}")
-            bucket = self._typed_subscribers[event_type]
+            bucket = self._typed_subscribers[resolved_type]
             if handler in bucket:
                 bucket.remove(handler)
             return
@@ -321,6 +390,8 @@ class World:
         | Mapping[str, WorldObject | Mapping[str, Any]]
         | None = None,
         terrain: TerrainGrid | Mapping[str, Any] | None = None,
+        daynight: DayNightCycle | DayNightConfig | Mapping[str, Any] | None = None,
+        config: Any = None,
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -353,6 +424,26 @@ class World:
         else:
             raise TypeError("terrain must be a TerrainGrid, a mapping, or None")
 
+        self.config: Any = config
+        if daynight is None and config is not None:
+            dn_cfg = getattr(config, "daynight", None)
+            if dn_cfg is not None:
+                daynight = dn_cfg
+
+        if daynight is None:
+            self.daynight: DayNightCycle = DayNightCycle()
+        elif isinstance(daynight, DayNightCycle):
+            self.daynight = DayNightCycle.from_dict(daynight.to_dict())
+        elif isinstance(daynight, DayNightConfig):
+            self.daynight = DayNightCycle(config=daynight)
+        elif isinstance(daynight, Mapping):
+            if "config" in daynight or "time_of_day" in daynight or "frozen" in daynight:
+                self.daynight = DayNightCycle.from_dict(daynight)
+            else:
+                self.daynight = DayNightCycle(config=daynight)
+        else:
+            raise TypeError("daynight must be a DayNightCycle, DayNightConfig, mapping, or None")
+
         self.tick: int = 0
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
@@ -361,6 +452,7 @@ class World:
         self._opaque_actions: dict[str, dict[str, Callable[..., Any]]] = {}
         self._perception_event_log: list[WorldEvent] = []
         self._has_been_perceived: bool = False
+        self._auto_held_composite_id: str | None = None
         self.events._internal_listeners.append(self._record_perception_event)
 
         if objects is not None:
@@ -371,7 +463,7 @@ class World:
                 items = objects
             for item in items:
                 if isinstance(item, WorldObject):
-                    created = self._factory.create(item.model_dump())
+                    created = self._factory.create(item)
                 elif isinstance(item, Mapping):
                     created = self._factory.create(item)
                 else:
@@ -396,6 +488,102 @@ class World:
     def event_bus(self) -> EventBus:
         """Alias for ``events``."""
         return self.events
+
+    @property
+    def day_night(self) -> DayNightCycle:
+        """Alias for ``daynight``."""
+        return self.daynight
+
+    @property
+    def time_of_day(self) -> float:
+        """Current time-of-day fraction in ``[0.0, 1.0)`` (0.0=midnight, 0.5=noon)."""
+        return self.daynight.time_of_day
+
+    @property
+    def cycle_frozen(self) -> bool:
+        """Return True when the day/night cycle is frozen."""
+        return self.daynight.frozen
+
+    @property
+    def is_cycle_frozen(self) -> bool:
+        """Alias for ``cycle_frozen``."""
+        return self.daynight.frozen
+
+    @property
+    def light_level(self) -> float:
+        """Current smooth light level in ``[0.0, 1.0]``."""
+        return self.daynight.light
+
+    @property
+    def light(self) -> float:
+        """Alias for ``light_level``."""
+        return self.daynight.light
+
+    @property
+    def coarse_light_level(self) -> float:
+        """Current coarse numeric light level in ``[0.0, 1.0]``."""
+        return self.daynight.coarse_light
+
+    @property
+    def coarse_light(self) -> float:
+        """Alias for ``coarse_light_level``."""
+        return self.daynight.coarse_light
+
+    @property
+    def visibility_factor(self) -> float:
+        """Current perception ``visibility_factor`` driven by the day/night cycle."""
+        return self.daynight.visibility_factor
+
+    @property
+    def ambient_temperature(self) -> float:
+        """Current ambient temperature exposed for the body-state model."""
+        return self.daynight.ambient_temperature
+
+    @property
+    def temperature(self) -> float:
+        """Alias for ``ambient_temperature``."""
+        return self.daynight.ambient_temperature
+
+    def set_time_of_day(
+        self,
+        fraction: float,
+        *,
+        source: str = "creator",
+    ) -> float:
+        """Set the world's time of day to ``fraction`` in ``[0.0, 1.0]``, emitting ``time_of_day_changed``."""
+        _set_active_world(self)
+        prev_tod = self.daynight.time_of_day
+        new_tod = self.daynight.set_time_of_day(fraction)
+        self.events.emit(
+            TimeOfDayChangedEvent(
+                tick=self.tick,
+                source=source,
+                previous_time_of_day=prev_tod,
+                time_of_day=new_tod,
+                light_level=self.daynight.light,
+                ambient_temperature=self.daynight.ambient_temperature,
+            )
+        )
+        return new_tod
+
+    def freeze_cycle(
+        self,
+        frozen: bool = True,
+        *,
+        source: str = "creator",
+    ) -> bool:
+        """Freeze or unfreeze the day/night cycle, emitting ``cycle_frozen``."""
+        _set_active_world(self)
+        new_frozen = self.daynight.freeze_cycle(frozen)
+        self.events.emit(
+            CycleFrozenEvent(
+                tick=self.tick,
+                source=source,
+                frozen=new_frozen,
+                time_of_day=self.daynight.time_of_day,
+            )
+        )
+        return new_frozen
 
     def subscribe(
         self,
@@ -426,6 +614,8 @@ class World:
         _set_active_world(self)
         if isinstance(props, WorldObject):
             data = props.model_dump()
+            if data.get("id") == "object_0" or data.get("id") in self._factory._used:
+                data.pop("id", None)
         elif isinstance(props, Mapping):
             data = dict(props)
         else:
@@ -448,6 +638,39 @@ class World:
         )
         return obj
 
+    def _restore_part_object(
+        self,
+        part: WorldObject,
+        pos: Position,
+        level: str,
+        *,
+        source: str = "agent",
+    ) -> WorldObject:
+        """Restore a constituent ``part`` back into ``self.objects`` with its original id."""
+        _set_active_world(self)
+        part_id = part.id
+        if part_id in self.objects or part_id == "object_0":
+            part_id = self._factory._peek_next()
+
+        data = part.model_dump()
+        data["id"] = part_id
+        data["position"] = {"x": pos.x, "y": pos.y}
+        data["level"] = level
+        data["velocity"] = {"x": 0.0, "y": 0.0}
+        restored = validate_world_object(data)
+        self._factory._claim(restored.id)
+        self.objects[restored.id] = restored
+        self.events.emit(
+            ObjectSpawnedEvent(
+                tick=self.tick,
+                source=source,
+                object_id=restored.id,
+                position=restored.position,
+                object=restored.model_dump(mode="json"),
+            )
+        )
+        return restored
+
     def despawn(self, object_id: str, *, source: str = "creator") -> WorldObject:
         """Remove an object by id, emitting ``object_despawned``."""
         _set_active_world(self)
@@ -457,6 +680,8 @@ class World:
         self._opaque_actions.pop(object_id, None)
         if self.body.holding == object_id:
             self.body.holding = None
+        if self._auto_held_composite_id == object_id:
+            self._auto_held_composite_id = None
         if self.body.level == f"on_top_of:{object_id}":
             self.body.level = "raised" if self.terrain.is_ledge(self.body.position) else "ground"
         self.events.emit(
@@ -468,11 +693,13 @@ class World:
                 object=obj.model_dump(mode="json"),
             )
         )
-        # Topple any objects that were resting on top of the despawned object
+        # Topple any objects that were resting on top of or inside the despawned object
         for upper_id in sorted(self.objects):
             upper = self.objects.get(upper_id)
-            if upper is not None and upper.level == f"on_top_of:{object_id}":
-                self._topple_object(upper.id, support=obj, move_dx=0.0, move_dy=0.0)
+            if upper is None:
+                continue
+            if upper.level == f"on_top_of:{object_id}" or upper.level == f"inside:{object_id}":
+                self._topple_object(upper.id, support=obj, move_dx=0.0, move_dy=0.0, source=source)
         return obj
 
     def move(
@@ -526,7 +753,7 @@ class World:
 
         current = self.objects[object_id]
         merged = {**current.model_dump(), **dict(changes)}
-        updated = WorldObject.model_validate(merged)
+        updated = validate_world_object(merged)
         self.objects[object_id] = updated
 
         serialized_changes = json.loads(json.dumps(dict(changes)))
@@ -650,6 +877,7 @@ class World:
         force: float | None = None,
         *,
         direction: Any = (1.0, 0.0),
+        tool: str | WorldObject | None = None,
         source: str = "world",
     ) -> WorldObject:
         """Strike ``object_id`` with ``force``; fragile objects break, movable ones receive an impulse."""
@@ -668,113 +896,187 @@ class World:
             force_val = float(force)
             dir_val = force_or_direction
 
+        tool_obj: WorldObject | None = None
+        if isinstance(tool, WorldObject):
+            tool_obj = tool
+        elif isinstance(tool, str):
+            tool_obj = self.objects.get(tool)
+        elif self.body.holding is not None and self.body.holding != object_id:
+            tool_obj = self.objects.get(self.body.holding)
+
+        effective_impact = compute_strike_force(force_val, tool_obj)
+
         obj = self.objects[object_id]
-        if should_break_on_strike(obj, force_val):
+        if should_break_on_strike(obj, effective_impact):
             new_state = {**obj.state, "broken": True}
             return self.update_object(object_id, {"state": new_state}, source=source)
 
-        if not obj.fixed and force_val > 0.0:
-            self.apply_impulse(object_id, dir_val, force_val)
+        if not obj.fixed and effective_impact > 0.0:
+            self.apply_impulse(object_id, dir_val, effective_impact)
         return self.objects[object_id]
 
     def bind(
         self,
-        first_id: str,
-        second_id: str,
-        binder_id: str | None = None,
+        first_id: str | WorldObject,
+        second_id: str | WorldObject,
+        binder: str | WorldObject | None = None,
         *,
+        binder_id: str | None = None,
         source: str = "world",
-    ) -> bool:
-        """Bind ``first_id`` and ``second_id`` using a binding object. Returns True on success."""
-        _set_active_world(self)
-        if first_id not in self.objects:
-            raise KeyError(f"unknown object id: {first_id}")
-        if second_id not in self.objects:
-            raise KeyError(f"unknown object id: {second_id}")
-        if first_id == second_id:
-            raise ValueError("cannot bind an object to itself")
+    ) -> Any:
+        """Bind ``first_id`` and ``second_id`` using a binding object.
 
-        first = self.objects[first_id]
-        second = self.objects[second_id]
-        if binder_id is not None:
+        When called with ``binder_id=...`` (legacy property check), updates
+        ``state["bound_to"]`` and returns ``bool``. When called with positional
+        ``binder`` (building API), joins the objects into a ``Composite``.
+        """
+        _set_active_world(self)
+        fid = first_id.id if isinstance(first_id, WorldObject) else str(first_id)
+        sid = second_id.id if isinstance(second_id, WorldObject) else str(second_id)
+
+        if binder is None and binder_id is not None:
+            if fid not in self.objects:
+                raise KeyError(f"unknown object id: {fid}")
+            if sid not in self.objects:
+                raise KeyError(f"unknown object id: {sid}")
+            if fid == sid:
+                raise ValueError("cannot bind an object to itself")
             if binder_id not in self.objects:
                 raise KeyError(f"unknown object id: {binder_id}")
-            binder = self.objects[binder_id]
-        elif can_bind(first):
-            binder = first
-        elif can_bind(second):
-            binder = second
-        else:
-            return False
+            first_obj = self.objects[fid]
+            second_obj = self.objects[sid]
+            binder_obj = self.objects[binder_id]
+            if not can_bind(binder_obj):
+                return False
 
-        if not can_bind(binder):
-            return False
+            first_bound = list(first_obj.state.get("bound_to", []))
+            if sid not in first_bound:
+                first_bound.append(sid)
+            second_bound = list(second_obj.state.get("bound_to", []))
+            if fid not in second_bound:
+                second_bound.append(fid)
 
-        first_bound = list(first.state.get("bound_to", []))
-        if second_id not in first_bound:
-            first_bound.append(second_id)
-        second_bound = list(second.state.get("bound_to", []))
-        if first_id not in second_bound:
-            second_bound.append(first_id)
+            self.update_object(
+                fid,
+                {"state": {**first_obj.state, "bound_to": first_bound}},
+                source=source,
+            )
+            self.update_object(
+                sid,
+                {"state": {**second_obj.state, "bound_to": second_bound}},
+                source=source,
+            )
+            return True
 
-        self.update_object(first_id, {"state": {**first.state, "bound_to": first_bound}}, source=source)
-        self.update_object(second_id, {"state": {**second.state, "bound_to": second_bound}}, source=source)
-        return True
+        from arden.actions.verbs import bind as _verb_bind
+
+        res = _verb_bind(self, first_id, second_id, binder)
+        if res.ok and res.composite is not None:
+            return res.composite
+        return False
+
+    def _top_of_stack(self, base_id: str, *, exclude_id: str | None = None) -> str:
+        """Find the top-most object id currently resting in the stack above ``base_id``."""
+        curr_id = base_id
+        visited: set[str] = {base_id}
+        if exclude_id is not None:
+            visited.add(exclude_id)
+        while True:
+            next_id: str | None = None
+            for oid in sorted(self.objects):
+                if oid in visited:
+                    continue
+                if self.objects[oid].level == f"on_top_of:{curr_id}":
+                    next_id = oid
+                    break
+            if next_id is None:
+                break
+            visited.add(next_id)
+            curr_id = next_id
+        return curr_id
 
     def stack(
         self,
-        upper_id: str,
-        lower_id: str,
+        upper_id: str | WorldObject,
+        lower_id: str | WorldObject,
         *,
         source: str = "world",
     ) -> WorldObject:
         """Place ``upper_id`` on top of ``lower_id``, toppling immediately if unstable."""
         _set_active_world(self)
-        if upper_id not in self.objects:
-            raise KeyError(f"unknown object id: {upper_id}")
-        if lower_id not in self.objects:
-            raise KeyError(f"unknown object id: {lower_id}")
-        if upper_id == lower_id:
+        uid = upper_id.id if isinstance(upper_id, WorldObject) else str(upper_id)
+        lid = lower_id.id if isinstance(lower_id, WorldObject) else str(lower_id)
+        if uid not in self.objects:
+            raise KeyError(f"unknown object id: {uid}")
+        if lid not in self.objects:
+            raise KeyError(f"unknown object id: {lid}")
+        if uid == lid:
             raise ValueError("cannot stack an object on top of itself")
 
-        lower = self.objects[lower_id]
-        upper = self.objects[upper_id]
-        if self.body.holding == upper_id:
+        support_id = self._top_of_stack(lid, exclude_id=uid)
+        lower = self.objects[support_id]
+        upper = self.objects[uid]
+        if self.body.holding == uid:
             self.body.holding = None
+        if self._auto_held_composite_id == uid:
+            self._auto_held_composite_id = None
 
         prev_pos = upper.position
-        target_level = f"on_top_of:{lower_id}"
+        target_level = f"on_top_of:{support_id}"
+        score = stack_stability_score(upper, lower, self.objects)
+        new_state = {**upper.state, "made_by_agent": True, "stability_score": score}
         updated = upper.model_copy(
             update={
                 "position": lower.position.model_copy(),
                 "level": target_level,
                 "velocity": Velocity(x=0.0, y=0.0),
+                "state": new_state,
             }
         )
-        self.objects[upper_id] = updated
+        self.objects[uid] = updated
         if prev_pos != lower.position:
             self.events.emit(
                 ObjectMovedEvent(
                     tick=self.tick,
                     source=source,
-                    object_id=upper_id,
+                    object_id=uid,
                     previous_position=prev_pos,
                     position=lower.position,
                 )
             )
+            self._propagate_container_contents(uid, new_pos=lower.position, source=source)
         self.events.emit(
             ObjectChangedEvent(
                 tick=self.tick,
                 source=source,
-                object_id=upper_id,
+                object_id=uid,
                 changes={"level": target_level},
                 object=updated.model_dump(mode="json"),
             )
         )
-        if not is_stack_stable(updated, lower):
-            self._topple_object(upper_id, support=lower, move_dx=0.0, move_dy=0.0, source=source)
+        if not is_stack_stable(updated, lower, self.objects):
+            self._topple_object(uid, support=lower, move_dx=0.0, move_dy=0.0, source=source)
             self.resolve_collisions()
-        return self.objects[upper_id]
+        return self.objects[uid]
+
+    def insert(
+        self,
+        held_id: str | WorldObject,
+        target_id: str | WorldObject,
+    ) -> Any:
+        """Insert ``held_id`` into hollow ``target_id``."""
+        from arden.actions.verbs import insert as _verb_insert
+
+        return _verb_insert(self, held_id, target_id)
+
+    def separate(
+        self,
+        target_id: str | WorldObject,
+    ) -> Any:
+        """Separate a composite, container, or stack back into its parts."""
+        from arden.actions.verbs import separate as _verb_separate
+
+        return _verb_separate(self, target_id)
 
     def is_occluded(
         self,
@@ -840,6 +1142,45 @@ class World:
 
         return _invoke(self, action_id, *args, target=target, modifiers=modifiers, **kwargs)
 
+    def _propagate_container_contents(
+        self,
+        container_id: str,
+        *,
+        new_pos: Position,
+        source: str = "world",
+        _visited: set[str] | None = None,
+    ) -> None:
+        """Move any objects with ``level == 'inside:<container_id>'`` along with ``container_id``."""
+        if _visited is None:
+            _visited = set()
+        if container_id in _visited:
+            return
+        _visited.add(container_id)
+
+        for child_id in sorted(self.objects):
+            child = self.objects.get(child_id)
+            if child is None or child.level != f"inside:{container_id}":
+                continue
+            prev_pos = child.position
+            if prev_pos != new_pos:
+                updated_child = child.model_copy(update={"position": new_pos.model_copy()})
+                self.objects[child_id] = updated_child
+                self.events.emit(
+                    ObjectMovedEvent(
+                        tick=self.tick,
+                        source=source,
+                        object_id=child_id,
+                        previous_position=prev_pos,
+                        position=new_pos.model_copy(),
+                    )
+                )
+            self._propagate_container_contents(
+                child_id,
+                new_pos=new_pos,
+                source=source,
+                _visited=_visited,
+            )
+
     def _topple_object(
         self,
         upper_id: str,
@@ -860,15 +1201,13 @@ class World:
         upper = self.objects[upper_id]
         prev_pos = upper.position
 
-        # Determine fall direction (opposite to support movement or deterministic from IDs)
+        # Determine fall direction (opposite to support movement or deterministic from world RNG)
         move_len = math.hypot(move_dx, move_dy)
         if move_len > 1e-9:
             dir_x = -move_dx / move_len
             dir_y = -move_dy / move_len
         else:
-            id_u = int(upper.id.removeprefix("object_"))
-            id_s = int(support.id.removeprefix("object_"))
-            angle = ((id_u * 37 + id_s * 23) % 360) * (math.pi / 180.0)
+            angle = self.rng.uniform(0.0, 2.0 * math.pi)
             dir_x = math.cos(angle)
             dir_y = math.sin(angle)
 
@@ -897,6 +1236,11 @@ class World:
                     previous_position=prev_pos,
                     position=candidate_pos,
                 )
+            )
+            self._propagate_container_contents(
+                upper_id,
+                new_pos=candidate_pos,
+                source=source,
             )
         if upper.level != landing_level:
             self.events.emit(
@@ -931,7 +1275,7 @@ class World:
         source: str = "world",
         _visited: set[str] | None = None,
     ) -> bool:
-        """Carry or topple objects resting ``on_top_of`` ``lower_id``. Returns True if any toppled."""
+        """Carry or topple objects resting ``on_top_of`` or ``inside`` ``lower_id``."""
         if _visited is None:
             _visited = set()
         if lower_id in _visited or lower_id not in self.objects:
@@ -944,12 +1288,16 @@ class World:
         step_dist = math.hypot(dx, dy)
         any_toppled = False
 
+        # 1. Objects inside lower_id always move with the container
+        self._propagate_container_contents(lower_id, new_pos=lower.position, source=source)
+
+        # 2. Objects stacked on_top_of lower_id are carried if stable, else topple
         for upper_id in sorted(self.objects):
             upper = self.objects.get(upper_id)
             if upper is None or upper.level != f"on_top_of:{lower_id}":
                 continue
 
-            if is_stack_stable(upper, lower) and step_dist <= max_carry_step(upper, lower):
+            if is_stack_stable(upper, lower, self.objects) and step_dist <= max_carry_step(upper, lower):
                 prev_upper_pos = upper.position
                 carried_pos = Position(x=lower.position.x, y=lower.position.y)
                 if prev_upper_pos != carried_pos:
@@ -1203,6 +1551,13 @@ class World:
                 apply_velocity_response=False,
                 prevent_ledge_entry=prevent,
             )
+            for oid in ids:
+                if oid in self.objects:
+                    self._propagate_container_contents(
+                        oid,
+                        new_pos=self.objects[oid].position,
+                        source="world",
+                    )
 
     def _step_physics(self) -> None:
         """Execute one deterministic tick of 2.5D physics."""
@@ -1233,7 +1588,7 @@ class World:
                         object=updated.model_dump(mode="json"),
                     )
                 )
-            elif not is_stack_stable(obj, support) or obj.velocity.speed > 0.0:
+            elif not is_stack_stable(obj, support, self.objects) or obj.velocity.speed > 0.0:
                 self._topple_object(
                     obj_id,
                     support=support,
@@ -1389,7 +1744,7 @@ class World:
                 nvx, nvy = 0.0, 0.0
             self.objects[oid] = obj.model_copy(update={"velocity": Velocity(x=nvx, y=nvy)})
 
-        # 6. Propagate carry or topple to objects stacked on top of moved supports
+        # 6. Propagate carry or topple to objects stacked on top of or inside moved supports
         any_toppled = False
         for oid in active_ids:
             obj = self.objects.get(oid)
@@ -1411,7 +1766,12 @@ class World:
         for oid in sorted(self.objects):
             prev_pos = start_positions.get(oid)
             obj = self.objects[oid]
-            if prev_pos is not None and obj.position != prev_pos and not obj.level.startswith("on_top_of:"):
+            if (
+                prev_pos is not None
+                and obj.position != prev_pos
+                and not obj.level.startswith("on_top_of:")
+                and not obj.level.startswith("inside:")
+            ):
                 self.events.emit(
                     ObjectMovedEvent(
                         tick=self.tick,
@@ -1429,12 +1789,13 @@ class World:
         # Advance the simulation RNG once per tick so tick progression is
         # bound to the seeded generator and verified across save/restore.
         self.rng.random()
+        self.daynight.step(1)
         self._step_physics()
         self.events.emit(TickEvent(tick=self.tick, source="world"))
         return self.tick
 
     def snapshot(self) -> str:
-        """Serialize the full world state (including RNG, terrain, and factory state) to JSON."""
+        """Serialize the full world state (including RNG, terrain, daynight, and factory state) to JSON."""
         version, internal_state, gauss_next = self.rng.getstate()
         payload = {
             "tick": self.tick,
@@ -1444,6 +1805,7 @@ class World:
                 for obj_id in sorted(self.objects)
             },
             "terrain": self.terrain.to_dict(),
+            "daynight": self.daynight.to_dict(),
             "factory": {
                 "next": self._factory._next,
                 "used": sorted(self._factory._used),
@@ -1476,7 +1838,7 @@ class World:
 
         restored_objects: dict[str, WorldObject] = {}
         for obj_id, obj_data in raw_objects.items():
-            obj = WorldObject.model_validate(obj_data)
+            obj = validate_world_object(obj_data)
             if obj.id != obj_id:
                 raise ValueError(f"object key {obj_id!r} does not match object.id {obj.id!r}")
             restored_objects[obj.id] = obj
@@ -1486,6 +1848,12 @@ class World:
             terrain = TerrainGrid.from_dict(raw_terrain)
         else:
             terrain = TerrainGrid()
+
+        raw_daynight = raw.get("daynight")
+        if isinstance(raw_daynight, Mapping):
+            daynight = DayNightCycle.from_dict(raw_daynight)
+        else:
+            daynight = DayNightCycle()
 
         factory = ObjectFactory()
         raw_factory = raw.get("factory")
@@ -1514,6 +1882,7 @@ class World:
         self.body = body
         self.objects = restored_objects
         self.terrain = terrain
+        self.daynight = daynight
         self._factory = factory
         _set_active_world(self)
         return self

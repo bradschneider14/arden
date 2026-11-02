@@ -1,4 +1,5 @@
 tick: 1
+light: 1
 body: pos=(0,0) level=ground energy=0.75 comfort=0.3 holding=object_2
 objects:
 - object_2 dist=0 dir=here pos=(0,0) level=ground shape=long h=0.8 vol=0.002 w=0.4 rig=0.9 color=brown

@@ -1,4 +1,4 @@
-"""Body-level verbs, parameter validation, body modifiers, and opaque actions.
+"""Body-level verbs, building verbs, parameter validation, body modifiers, and opaque actions.
 
 Objects decide what each verb does via their hidden ``BehaviorRule`` entries
 plus deterministic 2.5D physics; the verb code stays generic.
@@ -14,20 +14,35 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from arden.world.objects import BehaviorRule, Position, Velocity, WorldObject
+from arden.world.objects import (
+     _COMPOSITE_EXTRA_KEYS,
+    BehaviorRule,
+    Composite,
+    Position,
+    Velocity,
+    WorldObject,
+    validate_world_object,
+)
 from arden.world.physics import (
     LEDGE_HEIGHT,
     _get_active_world,
     _object_elevation,
     _set_active_world,
     apply_impulse,
+    can_bind,
+    compute_strike_force,
     extract_xy,
     is_occluded,
+    is_stack_stable,
     normalize_direction,
+    stack_stability_score,
+    strike_impact_multiplier,
 )
 from arden.world.world import (
     ObjectChangedEvent,
+    ObjectDespawnedEvent,
     ObjectMovedEvent,
+    ObjectSpawnedEvent,
     SpokeEvent,
     World,
     WorldEvent,
@@ -135,6 +150,56 @@ class ActionResult(BaseModel):
         """Alias for ``reason``."""
         return self.reason
 
+    @property
+    def composite(self) -> Composite | None:
+        """Return the ``Composite`` object produced by this action, if any."""
+        comp = self.data.get("composite")
+        if isinstance(comp, Composite):
+            return comp
+        return None
+
+    @property
+    def object(self) -> WorldObject | None:
+        """Return the primary ``WorldObject`` produced or affected by this action, if any."""
+        for key in ("composite", "object"):
+            val = self.data.get(key)
+            if isinstance(val, WorldObject):
+                return val
+        return None
+
+    @property
+    def id(self) -> str | None:
+        """Return the primary object/composite ID from ``data``, if any."""
+        for key in ("composite_id", "id", "object_id", "stacked", "inserted", "holding"):
+            val = self.data.get(key)
+            if isinstance(val, str):
+                return val
+        obj = self.object
+        return obj.id if obj is not None else None
+
+    @property
+    def parts(self) -> list[Any]:
+        """Return separated or constituent parts from ``data``, if any."""
+        if "part_objects" in self.data and isinstance(self.data["part_objects"], list):
+            return self.data["part_objects"]
+        if "parts" in self.data and isinstance(self.data["parts"], list):
+            return self.data["parts"]
+        comp = self.composite
+        return list(comp.parts) if comp is not None else []
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        data_dict = self.__dict__.get("data", {})
+        if isinstance(data_dict, Mapping):
+            for key in ("composite", "object"):
+                obj = data_dict.get(key)
+                if isinstance(obj, WorldObject) and hasattr(obj, name):
+                    return getattr(obj, name)
+            if name in data_dict:
+                return data_dict[name]
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
     def __bool__(self) -> bool:
         return self.ok
 
@@ -223,10 +288,13 @@ def _validate_unit_interval(value: Any) -> float | None:
 
 def _resolve_target_object(
     world: World,
-    target: str | WorldObject | None,
+    target: str | WorldObject | ActionResult | None,
 ) -> WorldObject | None:
     if target is None:
         return None
+    if isinstance(target, ActionResult):
+        tid = target.id
+        return world.objects.get(tid) if tid is not None else target.object
     if isinstance(target, WorldObject):
         return world.objects.get(target.id, target if target.id in world.objects else None)
     if isinstance(target, str):
@@ -274,7 +342,9 @@ def in_reach(
 
     # Check if actual_target is an object or object id
     obj: WorldObject | None = None
-    if isinstance(actual_target, WorldObject):
+    if isinstance(actual_target, ActionResult):
+        obj = _resolve_target_object(world, actual_target)
+    elif isinstance(actual_target, WorldObject):
         obj = world.objects.get(actual_target.id, actual_target)
     elif isinstance(actual_target, str):
         obj = world.objects.get(actual_target)
@@ -370,6 +440,110 @@ def _apply_rule_state_updates(
 
     world.update_object(obj.id, changes, source="agent")
     return True
+
+
+def _detach_from_container(world: World, child_obj: WorldObject) -> None:
+    """If ``child_obj`` is currently ``inside:<container_id>``, update the container's contents and weight."""
+    if not child_obj.level.startswith("inside:"):
+        return
+    container_id = child_obj.level.removeprefix("inside:")
+    container = world.objects.get(container_id)
+    if container is None:
+        return
+
+    remaining = [
+        o for o in world.objects.values()
+        if o.id != child_obj.id and o.level == f"inside:{container_id}"
+    ]
+    remaining_ids = [o.id for o in remaining]
+
+    if isinstance(container, Composite) and container.base_object is not None:
+        base_obj = WorldObject.model_validate(container.base_object)
+        if not remaining:
+            restored_state = dict(base_obj.state)
+            restored_state.pop("contents", None)
+            restored = base_obj.model_copy(
+                update={
+                    "position": container.position.model_copy(),
+                    "level": container.level,
+                    "velocity": container.velocity.model_copy(),
+                    "state": restored_state,
+                }
+            )
+            world.objects[container_id] = restored
+            world.events.emit(
+                ObjectChangedEvent(
+                    tick=world.tick,
+                    source="agent",
+                    object_id=container_id,
+                    changes={"weight": restored.weight, "state": restored_state},
+                    object=restored.model_dump(mode="json"),
+                )
+            )
+            return
+
+        new_weight = round(base_obj.weight + sum(o.weight for o in remaining), 6)
+        new_state = {**container.state, "contents": remaining_ids, "made_by_agent": True}
+        updated_comp = container.model_copy(
+            update={
+                "weight": new_weight,
+                "parts": [base_obj, *remaining],
+                "state": new_state,
+            }
+        )
+        world.objects[container_id] = updated_comp
+        world.events.emit(
+            ObjectChangedEvent(
+                tick=world.tick,
+                source="agent",
+                object_id=container_id,
+                changes={"weight": new_weight, "state": new_state},
+                object=updated_comp.model_dump(mode="json"),
+            )
+        )
+    else:
+        new_weight = max(0.0, round(container.weight - child_obj.weight, 6))
+        new_state = dict(container.state)
+        if remaining_ids:
+            new_state["contents"] = remaining_ids
+        else:
+            new_state.pop("contents", None)
+        world.update_object(
+            container_id,
+            {"weight": new_weight, "state": new_state},
+            source="agent",
+        )
+
+
+def _separate_bound_composite(
+    world: World,
+    comp: Composite,
+    *,
+    source: str = "agent",
+) -> list[WorldObject]:
+    """Despawn bound ``comp`` and restore its original constituent parts to ``world.objects``."""
+    original_parts = comp.original_parts
+    base_pos = comp.position.model_copy()
+    base_level = "raised" if world.terrain.is_ledge(base_pos) else "ground"
+
+    if comp.id in world.objects:
+        world.despawn(comp.id, source=source)
+
+    restored: list[WorldObject] = []
+    count = max(1, len(original_parts))
+    offset = max(0.10, comp.radius * 0.6)
+    for idx, part in enumerate(original_parts):
+        angle = idx * (2.0 * math.pi / count)
+        px = base_pos.x + (math.cos(angle) * offset if count > 1 else 0.0)
+        py = base_pos.y + (math.sin(angle) * offset if count > 1 else 0.0)
+        part_pos = Position(x=px, y=py)
+        part_level = "raised" if world.terrain.is_ledge(part_pos) else base_level
+        spawned = world._restore_part_object(part, part_pos, part_level, source=source)
+        restored.append(spawned)
+
+    if restored:
+        world.resolve_collisions()
+    return [world.objects[p.id] for p in restored if p.id in world.objects]
 
 
 def _break_object(
@@ -522,7 +696,7 @@ def move(
         if not resolved_world.move_agent(dest):
             return ActionResult(ok=False, reason=OUT_OF_REACH)
 
-        # Keep held item moving with the agent body
+        # Keep held item (and anything inside it) moving with the agent body
         held_id = resolved_world.body.holding
         if held_id is not None and held_id in resolved_world.objects:
             held_obj = resolved_world.objects[held_id]
@@ -544,6 +718,11 @@ def move(
                             previous_position=old_obj_pos,
                             position=dest,
                         )
+                    )
+                    resolved_world._propagate_container_contents(
+                        held_id,
+                        new_pos=dest,
+                        source="agent",
                     )
     finally:
         unsub()
@@ -710,24 +889,50 @@ def push(
     )
 
 
+def _is_object_ref(val: Any) -> bool:
+    return isinstance(val, str | WorldObject | ActionResult)
+
+
 def strike(
-    world_or_target: World | str | WorldObject,
+    world_or_target: Any,
     target_or_force: Any = 0.5,
-    force: float | None = None,
+    force: Any = None,
+    fourth_arg: Any = None,
     *,
     direction: Any = None,
+    tool: str | WorldObject | ActionResult | None = None,
+    with_object: str | WorldObject | ActionResult | None = None,
+    held: str | WorldObject | ActionResult | None = None,
+    using: str | WorldObject | ActionResult | None = None,
     world: World | None = None,
     modifiers: BodyModifiers | Mapping[str, Any] | None = None,
 ) -> ActionResult:
-    """Strike ``target`` with ``force`` (in ``0..1``). Fragile objects above threshold break."""
+    """Strike ``target`` with ``force`` (in ``0..1``).
+
+    When the agent holds an object (or a ``tool`` is given), the impact scales
+    with the tool's derived ``weight``, ``length``/``height``, ``rigidity``,
+    and ``center_of_mass``. Bound composites fail at the joint when struck or
+    swung above their ``joint_strength``.
+    """
+    explicit_tool = tool or with_object or held or using
     if isinstance(world_or_target, World):
         resolved_world = _resolve_world(world_or_target)
-        actual_target = target_or_force
-        raw_force = 0.5 if force is None else force
+        if _is_object_ref(target_or_force) and _is_object_ref(force):
+            explicit_tool = explicit_tool or target_or_force
+            actual_target = force
+            raw_force = 0.5 if fourth_arg is None else fourth_arg
+        else:
+            actual_target = target_or_force
+            raw_force = 0.5 if force is None else force
     else:
         resolved_world = _resolve_world(world)
-        actual_target = world_or_target
-        raw_force = target_or_force if force is None else force
+        if _is_object_ref(world_or_target) and _is_object_ref(target_or_force):
+            explicit_tool = explicit_tool or world_or_target
+            actual_target = target_or_force
+            raw_force = 0.5 if force is None else force
+        else:
+            actual_target = world_or_target
+            raw_force = target_or_force if force is None else force
 
     mods = _resolve_modifiers(resolved_world, modifiers)
     valid_force = _validate_unit_interval(raw_force)
@@ -738,7 +943,17 @@ def strike(
     if target_obj is None:
         return ActionResult(ok=False, reason=OUT_OF_REACH)
 
-    if not in_reach(resolved_world, target_obj, modifiers=mods):
+    tool_obj: WorldObject | None = None
+    if explicit_tool is not None:
+        tool_obj = _resolve_target_object(resolved_world, explicit_tool)
+        if tool_obj is None or not in_reach(resolved_world, tool_obj, modifiers=mods):
+            return ActionResult(ok=False, reason=OUT_OF_REACH)
+    elif resolved_world.body.holding is not None and resolved_world.body.holding != target_obj.id:
+        tool_obj = resolved_world.objects.get(resolved_world.body.holding)
+
+    # A held long tool extends reach slightly by its length
+    reach_bonus = max(0.0, tool_obj.length * 0.5) if tool_obj is not None else 0.0
+    if not in_reach(resolved_world, target_obj, reach=DEFAULT_REACH + reach_bonus, modifiers=mods):
         return ActionResult(ok=False, reason=OUT_OF_REACH)
 
     effective_force = valid_force * mods.force
@@ -753,6 +968,9 @@ def strike(
     else:
         strike_dir = _direction_from_agent_to_object(resolved_world, target_obj)
 
+    tool_mult = strike_impact_multiplier(tool_obj)
+    effective_impact = compute_strike_force(effective_force, tool_obj)
+
     strike_rules = [r for r in target_obj.behavior if r.verb == "strike"]
     break_rules = [
         r
@@ -764,10 +982,44 @@ def strike(
     captured: list[WorldEvent] = []
     unsub = resolved_world.subscribe(captured.append)
     try:
-        # 1. Check if object breaks (via explicit break rule or fragile property)
+        # Check if target itself is a bound Composite whose joint fails under load
+        if (
+            isinstance(target_obj, Composite)
+            and target_obj.join_type == "bind"
+            and target_obj.parts
+            and effective_impact > target_obj.joint_strength
+        ):
+            restored = _separate_bound_composite(resolved_world, target_obj, source="agent")
+            return ActionResult(
+                ok=True,
+                reason=None,
+                events=captured,
+                data={
+                    "broken": True,
+                    "joint_failed": True,
+                    "object_id": target_obj.id,
+                    "separated_parts": [p.id for p in restored],
+                    "piece_ids": [p.id for p in restored],
+                    "effective_force": effective_impact,
+                    "impact_force": effective_impact,
+                },
+            )
+
+        # Check if held/used bound Composite tool fails at its joint under load
+        joint_failed = False
+        separated_tool_parts: list[str] = []
+        if (
+            isinstance(tool_obj, Composite)
+            and tool_obj.join_type == "bind"
+            and tool_obj.parts
+            and effective_force > tool_obj.joint_strength
+        ):
+            joint_failed = True
+
+        # 1. Check if target object breaks (via explicit break rule or fragile property)
         matched_break_rule: BehaviorRule | None = None
         for b_rule in break_rules:
-            if _rule_matches_force(b_rule, effective_force):
+            if _rule_matches_force(b_rule, effective_impact):
                 matched_break_rule = b_rule
                 break
 
@@ -779,19 +1031,27 @@ def strike(
                 if isinstance(raw_thresh, int | float) and not isinstance(raw_thresh, bool)
                 else DEFAULT_FRAGILE_BREAK_THRESHOLD
             )
-            if effective_force > thresh or (thresh >= 1.0 and effective_force >= 1.0):
+            if effective_impact > thresh or (thresh >= 1.0 and effective_impact >= 1.0):
                 should_break = True
 
         if should_break:
             pieces = _break_object(resolved_world, target_obj, matched_break_rule)
+            if joint_failed and isinstance(tool_obj, Composite) and tool_obj.id in resolved_world.objects:
+                restored_parts = _separate_bound_composite(resolved_world, tool_obj, source="agent")
+                separated_tool_parts = [p.id for p in restored_parts]
             return ActionResult(
                 ok=True,
                 reason=None,
                 events=captured,
                 data={
                     "broken": True,
+                    "joint_failed": joint_failed,
+                    "separated_parts": separated_tool_parts,
                     "object_id": target_obj.id,
                     "piece_ids": [p.id for p in pieces],
+                    "effective_force": effective_impact,
+                    "impact_force": effective_impact,
+                    "tool_multiplier": tool_mult,
                 },
             )
 
@@ -801,7 +1061,7 @@ def strike(
         for rule in strike_rules:
             if rule in break_rules:
                 continue
-            if not _rule_matches_force(rule, effective_force):
+            if not _rule_matches_force(rule, effective_impact):
                 continue
             extras = _rule_extras(rule)
             resp = str(extras.get("response", "")).lower()
@@ -825,7 +1085,7 @@ def strike(
                         resolved_world,
                         current_obj.id,
                         strike_dir,
-                        effective_force * scale,
+                        effective_impact * scale,
                     )
                 impulse_applied = True
                 any_effect = True
@@ -837,7 +1097,7 @@ def strike(
                         resolved_world,
                         current_obj.id,
                         strike_dir,
-                        effective_force * scale,
+                        effective_impact * scale,
                     )
                     if after_obj.velocity != before_vel:
                         resolved_world.events.emit(
@@ -856,7 +1116,7 @@ def strike(
         current_obj = resolved_world.objects.get(target_obj.id)
         if current_obj is not None and not impulse_applied and not current_obj.fixed:
             before_vel = current_obj.velocity
-            after_obj = apply_impulse(resolved_world, current_obj.id, strike_dir, effective_force)
+            after_obj = apply_impulse(resolved_world, current_obj.id, strike_dir, effective_impact)
             if after_obj.velocity != before_vel:
                 resolved_world.events.emit(
                     ObjectChangedEvent(
@@ -869,16 +1129,35 @@ def strike(
                 )
                 any_effect = True
 
+        if joint_failed and isinstance(tool_obj, Composite) and tool_obj.id in resolved_world.objects:
+            restored_parts = _separate_bound_composite(resolved_world, tool_obj, source="agent")
+            separated_tool_parts = [p.id for p in restored_parts]
+            any_effect = True
+
         if not any_effect:
             return ActionResult(ok=False, reason=NOTHING_HAPPENED)
     finally:
         unsub()
 
+    vel_dump = (
+        resolved_world.objects[target_obj.id].velocity.model_dump(mode="json")
+        if target_obj.id in resolved_world.objects
+        else {"x": 0.0, "y": 0.0}
+    )
     return ActionResult(
         ok=True,
         reason=None,
         events=captured,
-        data={"broken": False, "object_id": target_obj.id},
+        data={
+            "broken": False,
+            "joint_failed": joint_failed,
+            "separated_parts": separated_tool_parts,
+            "object_id": target_obj.id,
+            "effective_force": effective_impact,
+            "impact_force": effective_impact,
+            "tool_multiplier": tool_mult,
+            "velocity": vel_dump,
+        },
     )
 
 
@@ -898,11 +1177,23 @@ def grab(
         actual_target = world_or_target
 
     mods = _resolve_modifiers(resolved_world, modifiers)
+    target_obj = _resolve_target_object(resolved_world, actual_target)
 
     if resolved_world.body.holding is not None:
-        return ActionResult(ok=False, reason=HANDS_FULL)
+        if target_obj is not None and resolved_world.body.holding == target_obj.id:
+            resolved_world._auto_held_composite_id = None
+            return ActionResult(
+                ok=True,
+                reason=None,
+                events=[],
+                data={"holding": target_obj.id},
+            )
+        if resolved_world._auto_held_composite_id == resolved_world.body.holding:
+            resolved_world.body.holding = None
+            resolved_world._auto_held_composite_id = None
+        else:
+            return ActionResult(ok=False, reason=HANDS_FULL)
 
-    target_obj = _resolve_target_object(resolved_world, actual_target)
     if target_obj is None:
         return ActionResult(ok=False, reason=OUT_OF_REACH)
 
@@ -935,6 +1226,9 @@ def grab(
     captured: list[WorldEvent] = []
     unsub = resolved_world.subscribe(captured.append)
     try:
+        if target_obj.level.startswith("inside:"):
+            _detach_from_container(resolved_world, target_obj)
+
         # Topple anything that was stacked on top of the grabbed object
         for upper_id in sorted(resolved_world.objects):
             upper = resolved_world.objects.get(upper_id)
@@ -967,6 +1261,7 @@ def grab(
         )
         resolved_world.objects[target_obj.id] = updated_obj
         resolved_world.body.holding = target_obj.id
+        resolved_world._auto_held_composite_id = None
 
         if prev_pos != agent_pos:
             resolved_world.events.emit(
@@ -977,6 +1272,11 @@ def grab(
                     previous_position=prev_pos,
                     position=agent_pos,
                 )
+            )
+            resolved_world._propagate_container_contents(
+                target_obj.id,
+                new_pos=agent_pos,
+                source="agent",
             )
         resolved_world.events.emit(
             ObjectChangedEvent(
@@ -1018,6 +1318,7 @@ def drop(
     held_id = resolved_world.body.holding
     if held_id is None or held_id not in resolved_world.objects:
         resolved_world.body.holding = None
+        resolved_world._auto_held_composite_id = None
         return ActionResult(ok=False, reason=NOTHING_HAPPENED)
 
     if explicit_target is not None:
@@ -1033,6 +1334,7 @@ def drop(
     unsub = resolved_world.subscribe(captured.append)
     try:
         resolved_world.body.holding = None
+        resolved_world._auto_held_composite_id = None
         prev_pos = held_obj.position
         updated_obj = held_obj.model_copy(
             update={
@@ -1052,6 +1354,11 @@ def drop(
                     previous_position=prev_pos,
                     position=drop_pos,
                 )
+            )
+            resolved_world._propagate_container_contents(
+                held_id,
+                new_pos=drop_pos,
+                source="agent",
             )
         resolved_world.events.emit(
             ObjectChangedEvent(
@@ -1105,6 +1412,7 @@ def place(
     held_id = resolved_world.body.holding
     if held_id is None or held_id not in resolved_world.objects:
         resolved_world.body.holding = None
+        resolved_world._auto_held_composite_id = None
         return ActionResult(ok=False, reason=NOTHING_HAPPENED)
 
     if actual_location is None:
@@ -1135,6 +1443,7 @@ def place(
     unsub = resolved_world.subscribe(captured.append)
     try:
         resolved_world.body.holding = None
+        resolved_world._auto_held_composite_id = None
         prev_pos = held_obj.position
         updated_obj = held_obj.model_copy(
             update={
@@ -1154,6 +1463,11 @@ def place(
                     previous_position=prev_pos,
                     position=dest_pos,
                 )
+            )
+            resolved_world._propagate_container_contents(
+                held_id,
+                new_pos=dest_pos,
+                source="agent",
             )
         resolved_world.events.emit(
             ObjectChangedEvent(
@@ -1180,6 +1494,645 @@ def place(
         events=captured,
         data={"placed": held_id, "position": {"x": final_pos.x, "y": final_pos.y}},
     )
+
+
+def stack(
+    world_or_held: Any = None,
+    held_or_target: Any = None,
+    target: Any = None,
+    *,
+    held: Any = None,
+    world: World | None = None,
+    modifiers: BodyModifiers | Mapping[str, Any] | None = None,
+) -> ActionResult:
+    """Stack ``held`` onto ``target``.
+
+    Uses size, shape, and weight for a stability score; unstable stacks topple
+    deterministically given the world seed.
+    """
+    if isinstance(world_or_held, World):
+        resolved_world = _resolve_world(world_or_held)
+        if target is not None:
+            raw_held = held if held is not None else held_or_target
+            raw_target = target
+        elif held is not None:
+            raw_held = held
+            raw_target = held_or_target
+        else:
+            raw_held = resolved_world.body.holding
+            raw_target = held_or_target
+    else:
+        resolved_world = _resolve_world(world)
+        if held_or_target is not None:
+            raw_held = world_or_held
+            raw_target = held_or_target
+        elif held is not None:
+            raw_held = held
+            raw_target = world_or_held
+        else:
+            raw_held = resolved_world.body.holding
+            raw_target = world_or_held
+
+    mods = _resolve_modifiers(resolved_world, modifiers)
+
+    if raw_target is None:
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+    if raw_held is None:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+
+    held_obj = _resolve_target_object(resolved_world, raw_held)
+    target_obj = _resolve_target_object(resolved_world, raw_target)
+    if held_obj is None or target_obj is None:
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    if held_obj.id == target_obj.id:
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+
+    if (
+        resolved_world.body.holding is not None
+        and resolved_world.body.holding != held_obj.id
+        and resolved_world._auto_held_composite_id != resolved_world.body.holding
+    ):
+        return ActionResult(ok=False, reason=HANDS_FULL)
+
+    if not in_reach(resolved_world, held_obj, modifiers=mods) or not in_reach(
+        resolved_world, target_obj, modifiers=mods
+    ):
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    max_weight = MAX_GRAB_WEIGHT * mods.force
+    if held_obj.fixed or held_obj.weight > max_weight:
+        return ActionResult(ok=False, reason=TOO_HEAVY)
+
+    captured: list[WorldEvent] = []
+    unsub = resolved_world.subscribe(captured.append)
+    try:
+        if held_obj.level.startswith("inside:"):
+            _detach_from_container(resolved_world, held_obj)
+
+        support_id = resolved_world._top_of_stack(target_obj.id, exclude_id=held_obj.id)
+        support_obj = resolved_world.objects[support_id]
+        score = stack_stability_score(held_obj, support_obj, resolved_world.objects)
+
+        if not support_obj.made_by_agent:
+            resolved_world.update_object(
+                support_obj.id,
+                {"state": {**support_obj.state, "made_by_agent": True}},
+                source="agent",
+            )
+
+        stacked_obj = resolved_world.stack(held_obj.id, support_id, source="agent")
+        stable = stacked_obj.level == f"on_top_of:{support_id}"
+    finally:
+        unsub()
+
+    return ActionResult(
+        ok=True,
+        reason=None,
+        events=captured,
+        data={
+            "stacked": stacked_obj.id,
+            "target": target_obj.id,
+            "on_top_of": support_id,
+            "stable": stable,
+            "toppled": not stable,
+            "stability_score": score,
+            "stability": score,
+            "made_by_agent": True,
+            "level": stacked_obj.level,
+            "position": {"x": stacked_obj.position.x, "y": stacked_obj.position.y},
+            "object": stacked_obj,
+        },
+    )
+
+
+def bind(
+    world_or_held: Any = None,
+    held_or_target: Any = None,
+    target_or_binder: Any = None,
+    binder: Any = None,
+    *,
+    held: Any = None,
+    target: Any = None,
+    binder_id: Any = None,
+    world: World | None = None,
+    modifiers: BodyModifiers | Mapping[str, Any] | None = None,
+) -> ActionResult:
+    """Bind ``held`` and ``target`` using ``binder`` (which requires ``binding=True``).
+
+    Consumes ``binder`` into the joint and produces a ``Composite`` whose
+    properties (weight, length/height, rigidity, center of mass, shape, and
+    joint strength) are derived from its parts and binder.
+    """
+    explicit_binder = binder if binder is not None else binder_id
+    if isinstance(world_or_held, World):
+        resolved_world = _resolve_world(world_or_held)
+        if explicit_binder is not None and target is None and held is None:
+            if target_or_binder is not None:
+                raw_held = held_or_target
+                raw_target = target_or_binder
+                raw_binder = explicit_binder
+            else:
+                raw_held = resolved_world.body.holding
+                raw_target = held_or_target
+                raw_binder = explicit_binder
+        else:
+            raw_held = held if held is not None else held_or_target
+            raw_target = target if target is not None else target_or_binder
+            raw_binder = explicit_binder
+    else:
+        resolved_world = _resolve_world(world)
+        if target_or_binder is not None and explicit_binder is None:
+            raw_held = world_or_held
+            raw_target = held_or_target
+            raw_binder = target_or_binder
+        elif explicit_binder is not None:
+            if held_or_target is not None and world_or_held is not None:
+                raw_held = world_or_held
+                raw_target = held_or_target
+                raw_binder = explicit_binder
+            else:
+                raw_held = held if held is not None else resolved_world.body.holding
+                raw_target = target if target is not None else world_or_held
+                raw_binder = explicit_binder
+        else:
+            raw_held = held if held is not None else resolved_world.body.holding
+            raw_target = target if target is not None else world_or_held
+            raw_binder = held_or_target
+
+    mods = _resolve_modifiers(resolved_world, modifiers)
+
+    if raw_binder is None or raw_target is None:
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+    if raw_held is None:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+
+    held_obj = _resolve_target_object(resolved_world, raw_held)
+    target_obj = _resolve_target_object(resolved_world, raw_target)
+    binder_obj = _resolve_target_object(resolved_world, raw_binder)
+
+    if held_obj is None or target_obj is None or binder_obj is None:
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    if not (
+        in_reach(resolved_world, held_obj, modifiers=mods)
+        and in_reach(resolved_world, target_obj, modifiers=mods)
+        and in_reach(resolved_world, binder_obj, modifiers=mods)
+    ):
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    if not can_bind(binder_obj):
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+
+    if held_obj.id == target_obj.id or binder_obj.id in (held_obj.id, target_obj.id):
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+
+    if held_obj.fixed or target_obj.fixed or binder_obj.fixed:
+        return ActionResult(ok=False, reason=TOO_HEAVY)
+
+    # Dexterity check (cold reduces dexterity so binds can fail)
+    clamped_dex = max(0.0, min(1.0, mods.dexterity))
+    if clamped_dex <= 0.0:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+    if clamped_dex < 1.0 and resolved_world.rng.random() < (1.0 - clamped_dex):
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+
+    was_holding = resolved_world.body.holding in (held_obj.id, target_obj.id, binder_obj.id)
+    comp_pos = target_obj.position.model_copy()
+    comp_level = "raised" if resolved_world.terrain.is_ledge(comp_pos) else "ground"
+
+    captured: list[WorldEvent] = []
+    unsub = resolved_world.subscribe(captured.append)
+    try:
+        for obj in (held_obj, target_obj, binder_obj):
+            if obj.level.startswith("inside:"):
+                _detach_from_container(resolved_world, obj)
+
+        # Despawn binder (consumed into the joint) and constituent parts
+        resolved_world.despawn(binder_obj.id, source="agent")
+        resolved_world.despawn(held_obj.id, source="agent")
+        resolved_world.despawn(target_obj.id, source="agent")
+
+        comp_id = resolved_world._factory._peek_next()
+        composite = Composite.from_parts(
+            [held_obj, target_obj],
+            binder=binder_obj,
+            id=comp_id,
+            position=comp_pos,
+            level=comp_level,
+            join_type="bind",
+            made_by_agent=True,
+        )
+        resolved_world._factory._claim(composite.id)
+        resolved_world.objects[composite.id] = composite
+        resolved_world.events.emit(
+            ObjectSpawnedEvent(
+                tick=resolved_world.tick,
+                source="agent",
+                object_id=composite.id,
+                position=composite.position,
+                object=composite.model_dump(mode="json"),
+            )
+        )
+
+        if composite.weight <= MAX_GRAB_WEIGHT * mods.force and not composite.fixed:
+            resolved_world.body.holding = composite.id
+            resolved_world._auto_held_composite_id = None if was_holding else composite.id
+    finally:
+        unsub()
+
+    return ActionResult(
+        ok=True,
+        reason=None,
+        events=captured,
+        data={
+            "composite_id": composite.id,
+            "id": composite.id,
+            "composite": composite,
+            "object": composite,
+            "parts": [held_obj.id, target_obj.id],
+            "binder": binder_obj.id,
+            "binder_id": binder_obj.id,
+            "joint_strength": composite.joint_strength,
+            "center_of_mass": float(composite.center_of_mass),
+            "made_by_agent": True,
+        },
+    )
+
+
+def insert(
+    world_or_held: Any = None,
+    held_or_target: Any = None,
+    target: Any = None,
+    *,
+    held: Any = None,
+    world: World | None = None,
+    modifiers: BodyModifiers | Mapping[str, Any] | None = None,
+) -> ActionResult:
+    """Insert ``held`` into hollow ``target`` if it has enough available volume."""
+    if isinstance(world_or_held, World):
+        resolved_world = _resolve_world(world_or_held)
+        if target is not None:
+            raw_held = held if held is not None else held_or_target
+            raw_target = target
+        elif held is not None:
+            raw_held = held
+            raw_target = held_or_target
+        else:
+            raw_held = resolved_world.body.holding
+            raw_target = held_or_target
+    else:
+        resolved_world = _resolve_world(world)
+        if held_or_target is not None:
+            raw_held = world_or_held
+            raw_target = held_or_target
+        elif held is not None:
+            raw_held = held
+            raw_target = world_or_held
+        else:
+            raw_held = resolved_world.body.holding
+            raw_target = world_or_held
+
+    mods = _resolve_modifiers(resolved_world, modifiers)
+
+    if raw_target is None:
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+    if raw_held is None:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+
+    held_obj = _resolve_target_object(resolved_world, raw_held)
+    target_obj = _resolve_target_object(resolved_world, raw_target)
+    if held_obj is None or target_obj is None:
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    if held_obj.id == target_obj.id:
+        return ActionResult(ok=False, reason=INVALID_PARAMS)
+
+    if (
+        resolved_world.body.holding is not None
+        and resolved_world.body.holding != held_obj.id
+        and resolved_world._auto_held_composite_id != resolved_world.body.holding
+    ):
+        return ActionResult(ok=False, reason=HANDS_FULL)
+
+    if not in_reach(resolved_world, held_obj, modifiers=mods) or not in_reach(
+        resolved_world, target_obj, modifiers=mods
+    ):
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    max_weight = MAX_GRAB_WEIGHT * mods.force
+    if held_obj.fixed or held_obj.weight > max_weight:
+        return ActionResult(ok=False, reason=TOO_HEAVY)
+
+    if not target_obj.hollow:
+        return ActionResult(
+            ok=False,
+            reason=NOTHING_HAPPENED,
+            data={"reason_detail": "not_hollow"},
+        )
+
+    current_contents = [
+        o for o in resolved_world.objects.values()
+        if o.level == f"inside:{target_obj.id}" and o.id != held_obj.id
+    ]
+    used_volume = sum(o.volume for o in current_contents)
+    raw_cap = target_obj.state.get("capacity", target_obj.volume)
+    capacity = (
+        float(raw_cap)
+        if isinstance(raw_cap, int | float) and not isinstance(raw_cap, bool)
+        else target_obj.volume
+    )
+    if capacity <= 0.0 or held_obj.volume > (capacity - used_volume) + 1e-9:
+        return ActionResult(
+            ok=False,
+            reason=NOTHING_HAPPENED,
+            data={"reason_detail": "insufficient_volume"},
+        )
+
+    captured: list[WorldEvent] = []
+    unsub = resolved_world.subscribe(captured.append)
+    try:
+        if resolved_world.body.holding == held_obj.id:
+            resolved_world.body.holding = None
+            resolved_world._auto_held_composite_id = None
+
+        if held_obj.level.startswith("inside:"):
+            _detach_from_container(resolved_world, held_obj)
+
+        for upper_id in sorted(resolved_world.objects):
+            upper = resolved_world.objects.get(upper_id)
+            if upper is not None and upper.level == f"on_top_of:{held_obj.id}":
+                resolved_world._topple_object(
+                    upper.id,
+                    support=held_obj,
+                    move_dx=0.0,
+                    move_dy=0.0,
+                    source="agent",
+                )
+
+        prev_pos = held_obj.position
+        dest_pos = target_obj.position.model_copy()
+        inside_level = f"inside:{target_obj.id}"
+        updated_held = held_obj.model_copy(
+            update={
+                "position": dest_pos,
+                "level": inside_level,
+                "velocity": Velocity(x=0.0, y=0.0),
+                "state": {**held_obj.state, "made_by_agent": True},
+            }
+        )
+        resolved_world.objects[held_obj.id] = updated_held
+
+        if prev_pos != dest_pos:
+            resolved_world.events.emit(
+                ObjectMovedEvent(
+                    tick=resolved_world.tick,
+                    source="agent",
+                    object_id=held_obj.id,
+                    previous_position=prev_pos,
+                    position=dest_pos,
+                )
+            )
+            resolved_world._propagate_container_contents(
+                held_obj.id,
+                new_pos=dest_pos,
+                source="agent",
+            )
+        resolved_world.events.emit(
+            ObjectChangedEvent(
+                tick=resolved_world.tick,
+                source="agent",
+                object_id=held_obj.id,
+                changes={"level": inside_level, "state": updated_held.state},
+                object=updated_held.model_dump(mode="json"),
+            )
+        )
+
+        # Upgrade container to a Composite whose weight includes its contents
+        refreshed_target = resolved_world.objects[target_obj.id]
+        if isinstance(refreshed_target, Composite) and refreshed_target.base_object is not None:
+            base_dump = dict(refreshed_target.base_object)
+            base_container = WorldObject.model_validate(base_dump)
+        else:
+            base_dump = refreshed_target.model_dump(exclude=set(_COMPOSITE_EXTRA_KEYS))
+            base_container = WorldObject.model_validate(base_dump)
+
+        all_contents = [*current_contents, updated_held]
+        content_ids = [o.id for o in all_contents]
+        total_weight = round(base_container.weight + sum(o.weight for o in all_contents), 6)
+        new_container_state = {
+            **refreshed_target.state,
+            "made_by_agent": True,
+            "contents": content_ids,
+        }
+        container_comp = Composite.model_validate(
+            {
+                **base_dump,
+                "position": refreshed_target.position.model_copy(),
+                "level": refreshed_target.level,
+                "velocity": refreshed_target.velocity.model_copy(),
+                "weight": total_weight,
+                "state": new_container_state,
+                "parts": [base_container, *all_contents],
+                "join_type": "insert",
+                "base_object": base_dump,
+                "made_by_agent": True,
+            }
+        )
+        resolved_world.objects[target_obj.id] = container_comp
+        resolved_world.events.emit(
+            ObjectChangedEvent(
+                tick=resolved_world.tick,
+                source="agent",
+                object_id=target_obj.id,
+                changes={"weight": total_weight, "state": new_container_state},
+                object=container_comp.model_dump(mode="json"),
+            )
+        )
+    finally:
+        unsub()
+
+    return ActionResult(
+        ok=True,
+        reason=None,
+        events=captured,
+        data={
+            "inserted": held_obj.id,
+            "into": target_obj.id,
+            "container_id": target_obj.id,
+            "composite_id": target_obj.id,
+            "composite": resolved_world.objects[target_obj.id],
+            "object": resolved_world.objects[target_obj.id],
+            "contents": content_ids,
+            "made_by_agent": True,
+        },
+    )
+
+
+def separate(
+    world_or_target: Any = None,
+    target: Any = None,
+    *,
+    world: World | None = None,
+    modifiers: BodyModifiers | Mapping[str, Any] | None = None,
+) -> ActionResult:
+    """Take a composite, filled container, or stack apart and restore its original parts."""
+    if isinstance(world_or_target, World):
+        resolved_world = _resolve_world(world_or_target)
+        raw_target = target if target is not None else resolved_world.body.holding
+    else:
+        resolved_world = _resolve_world(world)
+        raw_target = world_or_target if world_or_target is not None else (
+            target if target is not None else resolved_world.body.holding
+        )
+
+    mods = _resolve_modifiers(resolved_world, modifiers)
+    if raw_target is None:
+        return ActionResult(ok=False, reason=NOTHING_HAPPENED)
+
+    target_obj = _resolve_target_object(resolved_world, raw_target)
+    if target_obj is None:
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    if not in_reach(resolved_world, target_obj, modifiers=mods):
+        return ActionResult(ok=False, reason=OUT_OF_REACH)
+
+    captured: list[WorldEvent] = []
+    unsub = resolved_world.subscribe(captured.append)
+    try:
+        # Case 1: Bound Composite
+        if isinstance(target_obj, Composite) and target_obj.join_type == "bind" and target_obj.parts:
+            restored = _separate_bound_composite(resolved_world, target_obj, source="agent")
+            part_ids = [p.id for p in restored]
+            return ActionResult(
+                ok=True,
+                reason=None,
+                events=captured,
+                data={
+                    "separated": target_obj.id,
+                    "parts": part_ids,
+                    "part_ids": part_ids,
+                    "part_objects": restored,
+                },
+            )
+
+        # Case 2: Target is inside a container, or target is a container holding objects
+        container_obj: WorldObject | None = None
+        items_to_remove: list[WorldObject] = []
+        if target_obj.level.startswith("inside:"):
+            cid = target_obj.level.removeprefix("inside:")
+            container_obj = resolved_world.objects.get(cid)
+            items_to_remove = [target_obj]
+        else:
+            inside_items = [
+                o for o in resolved_world.objects.values()
+                if o.level == f"inside:{target_obj.id}"
+            ]
+            if inside_items:
+                container_obj = target_obj
+                items_to_remove = inside_items
+
+        if container_obj is not None and items_to_remove:
+            base_pos = container_obj.position
+            landing_level = "raised" if resolved_world.terrain.is_ledge(base_pos) else "ground"
+            count = len(items_to_remove)
+            for idx, item in enumerate(items_to_remove):
+                _detach_from_container(resolved_world, item)
+                angle = idx * (2.0 * math.pi / max(1, count))
+                sep_dist = container_obj.radius + item.radius + 0.08
+                new_pos = Position(
+                    x=base_pos.x + math.cos(angle) * sep_dist,
+                    y=base_pos.y + math.sin(angle) * sep_dist,
+                )
+                prev_pos = item.position
+                updated_item = item.model_copy(
+                    update={
+                        "position": new_pos,
+                        "level": landing_level,
+                        "velocity": Velocity(x=0.0, y=0.0),
+                    }
+                )
+                resolved_world.objects[item.id] = updated_item
+                if prev_pos != new_pos:
+                    resolved_world.events.emit(
+                        ObjectMovedEvent(
+                            tick=resolved_world.tick,
+                            source="agent",
+                            object_id=item.id,
+                            previous_position=prev_pos,
+                            position=new_pos,
+                        )
+                    )
+                resolved_world.events.emit(
+                    ObjectChangedEvent(
+                        tick=resolved_world.tick,
+                        source="agent",
+                        object_id=item.id,
+                        changes={"level": landing_level},
+                        object=updated_item.model_dump(mode="json"),
+                    )
+                )
+            resolved_world.resolve_collisions()
+            part_ids = [container_obj.id, *[o.id for o in items_to_remove]]
+            part_objs = [resolved_world.objects[pid] for pid in part_ids if pid in resolved_world.objects]
+            return ActionResult(
+                ok=True,
+                reason=None,
+                events=captured,
+                data={
+                    "separated": container_obj.id,
+                    "parts": part_ids,
+                    "part_ids": part_ids,
+                    "part_objects": part_objs,
+                },
+            )
+
+        # Case 3: Stacked objects (target is on_top_of something or has objects on_top_of it)
+        stacked_above = [
+            o for o in resolved_world.objects.values()
+            if o.level == f"on_top_of:{target_obj.id}"
+        ]
+        if target_obj.level.startswith("on_top_of:") or stacked_above:
+            if target_obj.level.startswith("on_top_of:"):
+                sup_id = target_obj.level.removeprefix("on_top_of:")
+                sup = resolved_world.objects.get(sup_id, target_obj)
+                resolved_world._topple_object(
+                    target_obj.id,
+                    support=sup,
+                    move_dx=0.0,
+                    move_dy=0.0,
+                    source="agent",
+                )
+                resolved_world.resolve_collisions()
+                part_ids = [sup.id, target_obj.id]
+            else:
+                part_ids = [target_obj.id]
+                for upper in stacked_above:
+                    part_ids.append(upper.id)
+                    resolved_world._topple_object(
+                        upper.id,
+                        support=target_obj,
+                        move_dx=0.0,
+                        move_dy=0.0,
+                        source="agent",
+                    )
+                resolved_world.resolve_collisions()
+            part_objs = [resolved_world.objects[pid] for pid in part_ids if pid in resolved_world.objects]
+            return ActionResult(
+                ok=True,
+                reason=None,
+                events=captured,
+                data={
+                    "separated": target_obj.id,
+                    "parts": part_ids,
+                    "part_ids": part_ids,
+                    "part_objects": part_objs,
+                },
+            )
+    finally:
+        unsub()
+
+    return ActionResult(ok=False, reason=NOTHING_HAPPENED)
 
 
 def speak(
@@ -1232,14 +2185,7 @@ def register_opaque_action(
     *,
     world: World | None = None,
 ) -> str:
-    """Register an opaque action ``action_<n>`` with ``handler`` on an object.
-
-    Supports calling conventions:
-    - ``register_opaque_action(world, obj_id, "action_1", handler)``
-    - ``register_opaque_action(world, obj_id, handler)`` (auto-assigns ``action_<n>``)
-    - ``register_opaque_action(obj_id, "action_1", handler)``
-    - ``register_opaque_action(obj_id, handler)``
-    """
+    """Register an opaque action ``action_<n>`` with ``handler`` on an object."""
     resolved_world: World | None
     if isinstance(world_or_obj, World):
         resolved_world = world_or_obj
@@ -1527,7 +2473,8 @@ def execute_action(
         tgt = actual_target if actual_target is not None else actual_params.get("target")
         force = actual_params.get("force", 0.5)
         direction = actual_params.get("direction")
-        return strike(resolved_world, tgt, force, direction=direction, modifiers=modifiers)
+        tool = actual_params.get("tool", actual_params.get("held", actual_params.get("with_object")))
+        return strike(resolved_world, tgt, force, direction=direction, tool=tool, modifiers=modifiers)
     if verb == "grab":
         tgt = actual_target if actual_target is not None else actual_params.get("target")
         return grab(resolved_world, tgt, modifiers=modifiers)
@@ -1537,6 +2484,22 @@ def execute_action(
     if verb == "place":
         loc = actual_params.get("location", actual_params.get("position", actual_target))
         return place(resolved_world, loc, modifiers=modifiers)
+    if verb == "stack":
+        tgt = actual_target if actual_target is not None else actual_params.get("target")
+        held_arg = actual_params.get("held", actual_params.get("held_item"))
+        return stack(resolved_world, held_arg, tgt, modifiers=modifiers)
+    if verb == "bind":
+        tgt = actual_target if actual_target is not None else actual_params.get("target")
+        held_arg = actual_params.get("held", actual_params.get("held_item"))
+        binder_arg = actual_params.get("binder", actual_params.get("binder_id"))
+        return bind(resolved_world, held_arg, tgt, binder_arg, modifiers=modifiers)
+    if verb == "insert":
+        tgt = actual_target if actual_target is not None else actual_params.get("target")
+        held_arg = actual_params.get("held", actual_params.get("held_item"))
+        return insert(resolved_world, held_arg, tgt, modifiers=modifiers)
+    if verb == "separate":
+        tgt = actual_target if actual_target is not None else actual_params.get("target")
+        return separate(resolved_world, tgt, modifiers=modifiers)
     if verb == "speak":
         text = actual_params.get("text", actual_target)
         return speak(resolved_world, text, modifiers=modifiers)
@@ -1565,16 +2528,19 @@ __all__ = [
     "TOO_HEAVY",
     "ActionResult",
     "BodyModifiers",
+    "Composite",
     "OpaqueHandler",
     "ReasonCode",
     "available_actions",
     "available_opaque_actions",
+    "bind",
     "drop",
     "execute_action",
     "execute_opaque_action",
     "get_opaque_actions",
     "grab",
     "in_reach",
+    "insert",
     "invoke_opaque_action",
     "look",
     "move",
@@ -1585,6 +2551,8 @@ __all__ = [
     "register_action",
     "register_opaque_action",
     "run_opaque_action",
+    "separate",
     "speak",
+    "stack",
     "strike",
 ]
