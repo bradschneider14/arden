@@ -19,6 +19,10 @@ from arden.world.objects import (
     validate_world_object,
 )
 from arden.world.physics import (
+    AGENT_BODY_HEIGHT,
+    DEFAULT_EYE_HEIGHT,
+    LEDGE_CLIMB_MIN_HEIGHT,
+    LEDGE_HEIGHT,
     STACK_STABILITY_THRESHOLD,
     TILE_TYPES,
     TerrainGrid,
@@ -58,7 +62,11 @@ from arden.world.world import (
 )
 
 __all__ = [
+    "AGENT_BODY_HEIGHT",
+    "DEFAULT_EYE_HEIGHT",
     "EVENT_TYPES",
+    "LEDGE_CLIMB_MIN_HEIGHT",
+    "LEDGE_HEIGHT",
     "STACK_STABILITY_THRESHOLD",
     "PERCEPTIBLE_STATE_KEYS",
     "TILE_TYPES",
