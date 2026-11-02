@@ -46,6 +46,7 @@ from arden.world.objects import (
 from arden.world.physics import (
     COLLISION_ITERATIONS,
     COLLISION_RESTITUTION,
+    DEFAULT_EYE_HEIGHT,
     DEFAULT_OCCLUSION_TOLERANCE,
     MAX_SUBSTEP_DISTANCE,
     MAX_SUBSTEPS,
@@ -133,6 +134,7 @@ class AgentBody(BaseModel):
     holding: str | None = None
     wet: bool = False
     wetness: float = Field(default=0.0, ge=0.0, le=1.0)
+    eye_height: float = Field(default=DEFAULT_EYE_HEIGHT, gt=0.0)
 
     @field_validator("level")
     @classmethod
@@ -143,7 +145,7 @@ class AgentBody(BaseModel):
             )
         return value
 
-    @field_validator("energy", "comfort")
+    @field_validator("energy", "comfort", "eye_height")
     @classmethod
     def values_are_finite(cls, value: float) -> float:
         if not math.isfinite(value):
@@ -1338,6 +1340,7 @@ class World:
         target: Any,
         *,
         tolerance: float = DEFAULT_OCCLUSION_TOLERANCE,
+        eye_height: float | None = None,
     ) -> bool:
         """Return True when a taller object lies close to the line between ``viewer_pos`` and ``target``."""
         _set_active_world(self)
@@ -1346,6 +1349,7 @@ class World:
             target,
             self.objects,
             tolerance=tolerance,
+            eye_height=eye_height,
             world=self,
         )
 
