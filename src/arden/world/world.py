@@ -179,6 +179,7 @@ class WorldEvent(BaseModel):
     tick: int = Field(ge=0)
     source: str = "world"
     object_id: str | None = None
+    creator_label: str | None = None
     position: Position | None = None
     previous_position: Position | None = None
     changes: dict[str, Any] | None = None
@@ -457,12 +458,12 @@ class World:
         | None = None,
         terrain: TerrainGrid | Mapping[str, Any] | None = None,
         daynight: DayNightCycle | DayNightConfig | Mapping[str, Any] | None = None,
-        weather: WeatherSystem | WeatherConfig | Mapping[str, Any] | None = None,
+        weather: WeatherSystem | WeatherConfig | Mapping[str, Any] | str | None = None,
         config: Any = None,
         body_config: BodyConfig | Mapping[str, Any] | str | None = None,
         preset: str | None = None,
         drives: DriveState | Mapping[str, Any] | None = None,
-        weather: Any = "clear",
+
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -537,7 +538,13 @@ class World:
             else:
                 self.weather = WeatherSystem(config=weather)
         else:
-            raise TypeError("weather must be a WeatherSystem, WeatherConfig, mapping, or None")
+            if isinstance(weather, str):
+                default_w_seed = seed if seed is not None else (rng if isinstance(rng, int) and not isinstance(rng, bool) else 0)
+                self.weather = WeatherSystem(seed=default_w_seed)
+                if weather.strip().lower() not in ("", "clear"):
+                    self.weather.set_weather(weather.strip().lower(), intensity=1.0, duration=100_000)  # type: ignore[arg-type]
+            else:
+                raise TypeError("weather must be a WeatherSystem, WeatherConfig, mapping, str, or None")
         self.weather._bind_world(self)
 
         self.tick: int = 0
@@ -545,8 +552,8 @@ class World:
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
         self._manual_body_modifiers: Any = None
-        self.weather: Any = weather
-        self.weather_intensity: float = 1.0
+
+
         self._sheltered_override: float | bool | None = None
         resolved_body_cfg = (
             BodyConfig.from_preset(preset)
@@ -582,11 +589,33 @@ class World:
         _set_active_world(self)
 
     def _record_perception_event(self, event: WorldEvent) -> None:
+        if event.creator_label is None and event.object_id is not None:
+            obj = self.objects.get(event.object_id)
+            if obj is not None and obj.creator_label is not None:
+                event.creator_label = obj.creator_label
+            elif isinstance(event.object, Mapping):
+                raw_label = event.object.get("creator_label")
+                if isinstance(raw_label, str) and raw_label.strip():
+                    event.creator_label = raw_label.strip()
         if event.type == "tick":
             return
         if event.type == "object_spawned" and not self._has_been_perceived:
             return
         self._perception_event_log.append(event)
+
+    @property
+    def creator_labels(self) -> dict[str, str]:
+        """Mapping of ``object_<n>`` id to ``creator_label`` for the web client and observer log."""
+        return {
+            obj_id: obj.creator_label
+            for obj_id, obj in sorted(self.objects.items())
+            if obj.creator_label is not None
+        }
+
+    def get_creator_label(self, object_id: str) -> str | None:
+        """Return the ``creator_label`` for ``object_id`` (observer/UI only, never perception)."""
+        obj = self.objects.get(object_id)
+        return obj.creator_label if obj is not None else None
 
     @property
     def agent_body(self) -> AgentBody:
@@ -2420,3 +2449,19 @@ class World:
     def from_snapshot(cls, snapshot: str | bytes | Mapping[str, Any]) -> World:
         """Create a new ``World`` restored from ``snapshot``."""
         return cls._restore_from_cls(snapshot)
+
+    @classmethod
+    def from_file(
+        cls,
+        path: Any,
+        *,
+        rng: random.Random | int | None = None,
+        seed: int | None = None,
+        config: Any = None,
+    ) -> World:
+        """Load a ``World`` from a TOML or JSON world definition file."""
+        from arden.world.loader import load_world
+
+        return load_world(path, rng=rng, seed=seed, config=config)
+
+    load = from_file

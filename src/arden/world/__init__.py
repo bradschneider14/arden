@@ -12,6 +12,17 @@ from arden.environment.body import (
     compute_memory_salience,
 )
 from arden.world.clock import Clock, WorldClock
+from arden.world.loader import (
+    DEFAULT_WORLD_PATH,
+    FIRST_RUN_WORLD_PATH,
+    REQUIRED_MATERIAL_PROPERTIES,
+    check_property_coverage,
+    load_first_run_world,
+    load_world,
+    load_world_data,
+    property_coverage,
+    run_world_ticks,
+)
 from arden.world.objects import (
     PERCEPTIBLE_STATE_KEYS,
     BehaviorRule,
@@ -143,4 +154,13 @@ __all__ = [
     "stack_stability_score",
     "strike_impact_multiplier",
     "validate_world_object",
+    "DEFAULT_WORLD_PATH",
+    "FIRST_RUN_WORLD_PATH",
+    "REQUIRED_MATERIAL_PROPERTIES",
+    "check_property_coverage",
+    "load_first_run_world",
+    "load_world",
+    "load_world_data",
+    "property_coverage",
+    "run_world_ticks",
 ]

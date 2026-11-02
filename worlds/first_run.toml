@@ -1,0 +1,320 @@
+# First-run clearing world definition (Ticket #20).
+# Objects are defined purely by physical properties and hidden behavior rules.
+# Human-readable names live only in `creator_label` for the observer log / UI
+# and are never exposed to agent perception.
+
+[body]
+position = { x = 5.5, y = 7.5 }
+level = "ground"
+energy = 1.0
+comfort = 1.0
+
+[terrain]
+width = 16
+height = 16
+tile_size = 1.0
+default_type = "grass"
+
+# Stream along the eastern side of the clearing, flowing south -> north (+y).
+[[terrain.regions]]
+x0 = 11
+y0 = 0
+x1 = 12
+y1 = 15
+type = "water"
+flow = { x = 0.0, y = 1.0 }
+
+# Raised rock ledge in the northwest corner (elevation 1.0m, out of reach from ground).
+[[terrain.regions]]
+x0 = 1
+y0 = 12
+x1 = 3
+y1 = 14
+type = "ledge"
+
+# --- Large trees (tall, fixed, shade) ---
+[[objects]]
+id = "object_1"
+creator_label = "large_tree_north"
+position = { x = 4.0, y = 9.5 }
+level = "ground"
+shape = "cylinder"
+height = 3.5
+volume = 0.60
+weight = 120.0
+rigidity = 0.95
+fixed = true
+color = "brown"
+state = { shade = true, wet = false }
+
+[[objects]]
+id = "object_2"
+creator_label = "large_tree_south"
+position = { x = 8.5, y = 4.5 }
+level = "ground"
+shape = "cylinder"
+height = 3.2
+volume = 0.55
+weight = 110.0
+rigidity = 0.95
+fixed = true
+color = "brown"
+state = { shade = true, wet = false }
+
+# --- Stick near the agent starting position ---
+[[objects]]
+id = "object_3"
+creator_label = "stick"
+position = { x = 6.2, y = 7.5 }
+level = "ground"
+shape = "long"
+height = 0.8
+volume = 0.005
+weight = 0.3
+rigidity = 0.85
+color = "brown"
+state = { wet = false }
+
+# --- Flat stones near the rock ledge (stackable to climb onto the ledge) ---
+[[objects]]
+id = "object_4"
+creator_label = "flat_stone"
+position = { x = 2.5, y = 11.4 }
+level = "ground"
+shape = "flat"
+height = 0.28
+volume = 0.025
+weight = 2.6
+rigidity = 0.95
+color = "gray"
+state = { wet = false }
+
+[[objects]]
+id = "object_5"
+creator_label = "flat_stone_second"
+position = { x = 3.5, y = 11.4 }
+level = "ground"
+shape = "flat"
+height = 0.28
+volume = 0.024
+weight = 2.5
+rigidity = 0.95
+color = "gray"
+state = { wet = false }
+
+# --- Vine in the clearing (binding) ---
+[[objects]]
+id = "object_6"
+creator_label = "vine"
+position = { x = 4.5, y = 8.5 }
+level = "ground"
+shape = "long"
+height = 1.2
+volume = 0.003
+weight = 0.15
+rigidity = 0.15
+binding = true
+color = "green"
+state = { wet = false }
+
+# --- Ball (round, light, rolls when pushed, bounces when struck) ---
+[[objects]]
+id = "object_7"
+creator_label = "ball"
+position = { x = 5.5, y = 8.4 }
+level = "ground"
+shape = "sphere"
+height = 0.2
+volume = 0.004
+weight = 0.3
+rigidity = 0.7
+color = "red"
+state = { wet = false }
+behavior = [
+    { verb = "push", scale = 4 },
+    { verb = "strike", response = "bounce" },
+]
+
+# --- Hollow log (hollow, heavy) ---
+[[objects]]
+id = "object_8"
+creator_label = "hollow_log"
+position = { x = 7.5, y = 9.0 }
+level = "ground"
+shape = "cylinder"
+height = 0.6
+volume = 0.12
+weight = 4.5
+rigidity = 0.9
+hollow = true
+color = "brown"
+state = { wet = false }
+
+# --- Berry bush with fragile edible berries ---
+[[objects]]
+id = "object_9"
+creator_label = "berry_bush"
+position = { x = 3.0, y = 6.0 }
+level = "ground"
+shape = "sphere"
+height = 0.9
+volume = 0.15
+weight = 8.0
+rigidity = 0.5
+fragile = true
+fixed = true
+color = "green"
+state = { wet = false }
+behavior = [
+    { verb = "edible", energy = 0.15 },
+]
+
+[[objects]]
+id = "object_10"
+creator_label = "berries"
+position = { x = 3.4, y = 6.2 }
+level = "ground"
+shape = "sphere"
+height = 0.08
+volume = 0.0005
+weight = 0.05
+rigidity = 0.2
+fragile = true
+color = "red"
+state = { wet = false }
+behavior = [
+    { verb = "edible", energy = 0.20 },
+    { verb = "strike", response = "break", pieces = 0 },
+]
+
+# --- Leaves (very light, blown by wind and carried by water) ---
+[[objects]]
+id = "object_11"
+creator_label = "leaf"
+position = { x = 6.0, y = 6.2 }
+level = "ground"
+shape = "flat"
+height = 0.02
+volume = 0.0002
+weight = 0.02
+rigidity = 0.1
+color = "green"
+state = { wet = false }
+
+# --- Mailbox placeholder at the southern edge of the path (behavior in T21) ---
+[[objects]]
+id = "object_12"
+creator_label = "mailbox"
+position = { x = 5.5, y = 1.5 }
+level = "ground"
+shape = "cube"
+height = 1.0
+volume = 0.08
+weight = 15.0
+rigidity = 0.95
+hollow = true
+fixed = true
+color = "blue"
+state = { wet = false }
+behavior = [
+    { verb = "action_1" },
+]
+
+# --- Deliberate friction: objects on the raised rock ledge (out of reach from ground) ---
+[[objects]]
+id = "object_13"
+creator_label = "ledge_stick"
+position = { x = 2.5, y = 12.4 }
+level = "raised"
+shape = "long"
+height = 0.75
+volume = 0.004
+weight = 0.28
+rigidity = 0.85
+color = "brown"
+state = { wet = false }
+
+[[objects]]
+id = "object_14"
+creator_label = "ledge_berries"
+position = { x = 1.8, y = 13.5 }
+level = "raised"
+shape = "sphere"
+height = 0.09
+volume = 0.0006
+weight = 0.06
+rigidity = 0.25
+fragile = true
+color = "red"
+state = { wet = false }
+behavior = [
+    { verb = "edible", energy = 0.25 },
+]
+
+# --- Wet stone resting in the stream ---
+[[objects]]
+id = "object_15"
+creator_label = "stream_stone"
+position = { x = 11.5, y = 7.5 }
+level = "ground"
+shape = "flat"
+height = 0.22
+volume = 0.022
+weight = 2.8
+rigidity = 0.95
+color = "gray"
+state = { wet = true }
+
+# --- Deliberate friction: loose materials on the far side of the stream (x > 13) ---
+[[objects]]
+id = "object_16"
+creator_label = "far_bank_stick"
+position = { x = 14.0, y = 6.5 }
+level = "ground"
+shape = "long"
+height = 0.9
+volume = 0.006
+weight = 0.35
+rigidity = 0.85
+color = "brown"
+state = { wet = false }
+
+[[objects]]
+id = "object_17"
+creator_label = "far_bank_flat_stone"
+position = { x = 14.2, y = 8.5 }
+level = "ground"
+shape = "flat"
+height = 0.25
+volume = 0.020
+weight = 2.2
+rigidity = 0.95
+color = "gray"
+state = { wet = false }
+
+[[objects]]
+id = "object_18"
+creator_label = "far_bank_vine"
+position = { x = 13.8, y = 10.0 }
+level = "ground"
+shape = "long"
+height = 1.1
+volume = 0.003
+weight = 0.14
+rigidity = 0.15
+binding = true
+color = "green"
+state = { wet = false }
+
+[[objects]]
+id = "object_19"
+creator_label = "far_bank_leaf"
+position = { x = 14.5, y = 5.0 }
+level = "ground"
+shape = "flat"
+height = 0.02
+volume = 0.0002
+weight = 0.02
+rigidity = 0.1
+color = "green"
+state = { wet = false }

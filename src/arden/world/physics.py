@@ -233,6 +233,7 @@ class TerrainGrid:
         tile_size: float = 1.0,
         default_type: TileType = "grass",
         tiles: Mapping[tuple[int, int] | str, Tile | TileType | Mapping[str, Any]] | None = None,
+        regions: Iterable[Mapping[str, Any]] | None = None,
     ) -> None:
         if tile_size <= 0 or not math.isfinite(tile_size):
             raise ValueError("tile_size must be a finite number greater than 0")
@@ -261,6 +262,18 @@ class TerrainGrid:
                 else:
                     raise TypeError("tile keys must be (tx, ty) tuples or 'tx,ty' strings")
                 self._tiles[coord] = Tile.model_validate(value)
+
+        if regions is not None:
+            for reg in regions:
+                if not isinstance(reg, Mapping):
+                    raise TypeError("each terrain region must be a mapping")
+                x0 = float(reg.get("x0", reg.get("x_min", reg.get("x", 0.0))))
+                y0 = float(reg.get("y0", reg.get("y_min", reg.get("y", 0.0))))
+                x1 = float(reg.get("x1", reg.get("x_max", x0)))
+                y1 = float(reg.get("y1", reg.get("y_max", y0)))
+                tile_type = reg.get("type", reg.get("tile", self.default_type))
+                flow = reg.get("flow")
+                self.set_rect(x0, y0, x1, y1, tile_type, flow=flow)
 
     def world_to_cell(
         self,
@@ -458,6 +471,7 @@ class TerrainGrid:
             tile_size=float(data.get("tile_size", 1.0)),
             default_type=data.get("default_type", "grass"),
             tiles=data.get("tiles"),
+            regions=data.get("regions"),
         )
 
 

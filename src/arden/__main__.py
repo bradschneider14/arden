@@ -8,12 +8,16 @@ import random
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from arden import __version__
 from arden.config import Settings, load_config, make_rng
 from arden.llm.factory import make_backend
 from arden.llm.prompts import build_decide_prompt
 from arden.llm.schemas import Intent
+
+if TYPE_CHECKING:
+    from arden.world.world import World
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +31,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to arden.toml. Defaults to ./arden.toml when that file exists.",
+    )
+    run_parser.add_argument(
+        "--world",
+        type=Path,
+        default=None,
+        help="Path to a world definition file (e.g. worlds/first_run.toml).",
+    )
+    run_parser.add_argument(
+        "--ticks",
+        type=int,
+        default=None,
+        help="Number of simulation ticks to run when --world is given.",
     )
 
     smoke_parser = subparsers.add_parser(
@@ -42,14 +58,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_simulation(settings: Settings, rng: random.Random) -> None:
+def run_simulation(
+    settings: Settings,
+    rng: random.Random,
+    *,
+    world_path: Path | str | None = None,
+    ticks: int | None = None,
+) -> World | None:
     """Run one simulation.
 
-    ``settings`` and the seeded ``rng`` are the inputs for the world loop.
-    That loop is a later ticket. Until then this command only confirms the
-    wiring: config is loaded, one generator is created, and both are passed here.
+    When ``world_path`` is provided (e.g. ``--world worlds/first_run.toml``),
+    loads and validates the world definition and optionally steps ``ticks`` ticks.
+    When called without ``world_path``, preserves the placeholder wiring output.
     """
-    print("not implemented yet")
+    if world_path is None and ticks is None:
+        print("not implemented yet")
+        return None
+
+    from arden.world.loader import DEFAULT_WORLD_PATH, load_world, resolve_world_path, run_world_ticks
+
+    target_path = resolve_world_path(DEFAULT_WORLD_PATH if world_path is None else world_path)
+    world = load_world(target_path, rng=rng, settings=settings)
+    if ticks is not None and ticks > 0:
+        run_world_ticks(world, ticks=ticks, settings=settings)
+    print(f"loaded world: {target_path.name} objects={len(world.objects)} tick={world.tick}")
+    return world
 
 
 def run_llm_smoke(settings: Settings) -> Intent:
@@ -94,7 +127,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         settings = load_config(args.config)
-        run_simulation(settings, make_rng(settings))
+        if args.world is None and args.ticks is None:
+            run_simulation(settings, make_rng(settings))
+        else:
+            run_simulation(
+                settings,
+                make_rng(settings),
+                world_path=args.world,
+                ticks=args.ticks,
+            )
         return 0
     if args.command == "llm-smoke":
         settings = load_config(args.config)

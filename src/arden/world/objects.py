@@ -63,6 +63,7 @@ _HIDDEN_OBJECT_FIELDS = frozenset(
         "center_of_mass_offset",
         "base_object",
         "made_by_agent_flag",
+        "creator_label",
     }
 )
 
@@ -76,6 +77,7 @@ _COMPOSITE_EXTRA_KEYS = frozenset(
         "center_of_mass",
         "base_object",
         "made_by_agent_flag",
+        "creator_label",
         "made_by_agent",
         "length",
     }
@@ -303,6 +305,7 @@ class WorldObject(BaseModel):
     velocity: Velocity = Field(default_factory=Velocity)
     state: dict[str, Any] = Field(default_factory=dict)
     behavior: list[BehaviorRule] = Field(default_factory=list)
+    creator_label: str | None = None
 
     @property
     def radius(self) -> float:
@@ -357,6 +360,17 @@ class WorldObject(BaseModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("color must be a non-empty string")
+        return stripped
+
+    @field_validator("creator_label")
+    @classmethod
+    def creator_label_is_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("creator_label must be a non-empty string")
+        return stripped
         return stripped
 
     @field_validator("state")

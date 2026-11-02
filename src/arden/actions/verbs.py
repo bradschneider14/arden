@@ -724,8 +724,17 @@ def move(
         return ActionResult(ok=False, reason=INVALID_PARAMS)
 
     # Allow moving toward an object id if direction is an object_<n> string in world.objects
-    if isinstance(direction, str) and direction in resolved_world.objects:
-        target_obj = resolved_world.objects[direction]
+    dir_obj_id: str | None = None
+    if isinstance(direction, str):
+        stripped_dir = direction.strip()
+        for prefix in ("toward ", "towards ", "to "):
+            if stripped_dir.lower().startswith(prefix):
+                stripped_dir = stripped_dir[len(prefix) :].strip()
+                break
+        if stripped_dir in resolved_world.objects:
+            dir_obj_id = stripped_dir
+    if dir_obj_id is not None:
+        target_obj = resolved_world.objects[dir_obj_id]
         ux, uy = _direction_from_agent_to_object(resolved_world, target_obj)
     else:
         try:
