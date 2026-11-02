@@ -28,6 +28,42 @@ temperature_swing = 0.4
 # Peak daytime ambient temperature at noon.
 base_temperature = 1.0
 
+[weather]
+# Seed for the automated weather RNG.
+seed = 0
+# Length of one in-world hour in simulation ticks.
+ticks_per_hour = 25
+# Whether automated weather transitions are paused.
+paused = false
+
+[weather.chance]
+clear = 0.45
+rain = 0.3
+wind = 0.25
+cold = 0.2
+storm = 0.15
+
+[weather.duration]
+clear = [60, 150]
+rain = [40, 100]
+wind = [30, 90]
+cold = [40, 100]
+storm = [25, 70]
+
+[weather.intensity]
+clear = [0.0, 0.0]
+rain = [0.25, 0.85]
+wind = [0.25, 0.85]
+cold = [0.25, 0.85]
+storm = [0.5, 1.0]
+
+[weather.transitions]
+clear = ["rain", "wind", "cold"]
+rain = ["clear", "wind", "cold", "storm"]
+wind = ["clear", "rain", "cold", "storm"]
+cold = ["clear", "rain", "wind", "storm"]
+storm = ["rain", "wind", "cold", "clear"]
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"

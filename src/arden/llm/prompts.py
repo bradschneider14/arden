@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from arden.actions.verbs import ActionResult
 from arden.llm.base import require_role
 from arden.llm.schemas import VERBS
-from arden.perception.feed import BodyPercept, PerceivedObject, Percept
+if False: from arden.perception.feed import BodyPercept, PerceivedObject, Percept
 from arden.world.objects import Position, WorldObject
 from arden.world.world import AgentBody
 
@@ -110,7 +110,8 @@ def format_body_state(
         if stripped.startswith("body:"):
             stripped = stripped.removeprefix("body:").strip()
         return stripped or "none"
-    if isinstance(body_state, BodyPercept | AgentBody):
+    from arden.perception.feed import BodyPercept; is_body = isinstance(body_state, BodyPercept | AgentBody)
+    if is_body:
         held = body_state.holding if body_state.holding is not None else "none"
         return (
             f"pos={_fmt_pos(body_state.position)} "
@@ -140,6 +141,7 @@ def format_percept(percept: Percept | PerceivedObject | str | None) -> str:
     """Format percept delta text without duplicating or labeling semantics."""
     if percept is None:
         return "none"
+    from arden.perception.feed import PerceivedObject, Percept
     if isinstance(percept, Percept):
         text = percept.to_text().strip()
         return text if text else "no changes"
@@ -250,6 +252,7 @@ def build_prompt(
     if max_tokens <= 0:
         raise ValueError("max_tokens must be > 0")
 
+    from arden.perception.feed import PerceivedObject, Percept
     if body_state is None and isinstance(percept, Percept):
         body_state = percept.body
 
