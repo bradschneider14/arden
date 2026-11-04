@@ -56,6 +56,7 @@ TOO_HEAVY: Literal["too_heavy"] = "too_heavy"
 HANDS_FULL: Literal["hands_full"] = "hands_full"
 NOTHING_HAPPENED: Literal["nothing_happened"] = "nothing_happened"
 INVALID_PARAMS: Literal["invalid_params"] = "invalid_params"
+NO_PATH: Literal["no_path"] = "no_path"
 
 REASON_CODES: tuple[str, ...] = (
     OUT_OF_REACH,
@@ -412,7 +413,11 @@ def in_reach(
             return False
         obj_elev = _object_elevation(obj, world.objects, world.terrain)
         # An object on a raised ledge is out of reach from the ground unless the agent can reach that level
-        if obj.level == "raised" and world.body.level == "ground" and agent_elev < LEDGE_HEIGHT:
+        if (
+            (obj.level == "raised" or world.terrain.is_ledge(obj.position))
+            and world.body.level == "ground"
+            and agent_elev < LEDGE_HEIGHT
+        ):
             if not world.can_reach(obj.position):
                 return False
         if abs(obj_elev - agent_elev) > reach + 1e-6:
@@ -2710,6 +2715,7 @@ __all__ = [
     "INVALID_PARAMS",
     "MAX_GRAB_WEIGHT",
     "MAX_PUSH_WEIGHT",
+    "NO_PATH",
     "NOTHING_HAPPENED",
     "OUT_OF_REACH",
     "REASON_CODES",
