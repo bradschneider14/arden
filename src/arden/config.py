@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from arden.agent.gate import GateConfig, GateSettings
 from arden.environment.body import BodyConfig, BodySettings
 from arden.environment.daynight import DayNightConfig, DayNightSettings
 from arden.environment.weather import WeatherConfig, WeatherSettings
@@ -85,6 +86,7 @@ class Settings(BaseModel):
     daynight: DayNightSettings = Field(default_factory=DayNightSettings)
     body: BodySettings = Field(default_factory=BodySettings)
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
+    gate: GateSettings = Field(default_factory=GateSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
@@ -127,10 +129,14 @@ __all__ = [
     "BodySettings",
     "DayNightConfig",
     "DayNightSettings",
+    "GateConfig",
+    "GateSettings",
     "LlmSettings",
     "LoggingSettings",
     "PerceptionSettings",
     "Settings",
+    "WeatherConfig",
+    "WeatherSettings",
     "WorldSettings",
     "load_config",
     "make_rng",

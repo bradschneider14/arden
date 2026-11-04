@@ -70,6 +70,7 @@ low_energy_wake_threshold = 0.25
 low_comfort_wake_threshold = 0.25
 boredom_wake_threshold = 0.7
 curiosity_wake_threshold = 0.6
+
 [weather]
 # Seed for the automated weather RNG.
 seed = 0
@@ -105,6 +106,20 @@ rain = ["clear", "wind", "cold", "storm"]
 wind = ["clear", "rain", "cold", "storm"]
 cold = ["clear", "rain", "wind", "storm"]
 storm = ["rain", "wind", "cold", "clear"]
+
+[gate]
+# Periodic heartbeat interval in simulation ticks (chosen to over-wake).
+heartbeat_interval = 30
+# Surprise score threshold in [0.0, 1.0] (0 until T16 supplies scores).
+surprise_threshold = 0.25
+# Body energy threshold at or below which the gate wakes the LLM.
+low_energy_threshold = 0.3
+# Body comfort threshold at or below which the gate wakes the LLM.
+low_comfort_threshold = 0.3
+# Boredom drive threshold at or above which the gate wakes the LLM.
+boredom_threshold = 0.5
+# Minimum movement delta in meters for `<id> moves` / `<id> stops moving` conditions.
+move_threshold = 0.05
 
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".

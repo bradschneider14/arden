@@ -168,4 +168,34 @@ Section 16 (open question 6) asks how detailed composite physics (`center_of_mas
 - **LLM failure recovery (`LLMErrorEvent`)**: When `complete_json` or `Intent` validation raises `LLMOutputError`, `TimeoutError`, or `OSError`, the loop catches the error, leaves `controller.intent` untouched (so the agent keeps its current running intent or idles when `controller.intent is None`), and emits `LLMErrorEvent` (`type="llm_error"`) on `world.events`.
 - **Headless CLI (`python -m arden run`) and built-in test world (`build_test_world`)**: `python -m arden run` accepts `--ticks` (default `500`), `--llm` (backend override), and `--heartbeat`, constructs the deterministic 7-object clearing via `build_test_world(rng, settings)` (including `object_1` tree, `object_3` sphere in reach, and `object_7` movable sphere), and prints a single-line summary (`tick=<n> reasons=[...] goal='...' thought='...'`) per wake.
 
+## T15 — Rule-based attention gate with LLM-set wake conditions and logged decisions
+
+- **`RuleGate` replaces `HeartbeatGate` by default**: `RuleGate` in `src/arden/agent/gate.py` implements the `Gate` protocol (`should_wake(context) -> WakeDecision`) and is the default gate in `AgentLoop` (while `HeartbeatGate` remains available for backward compatibility).
+- **Config (`GateConfig` / `GateSettings` under `[gate]`) with over-waking defaults**: Added `[gate]` to `Settings` (`src/arden/config.py`) and `arden.example.toml`. Per `docs/DESIGN.md` Section 10.1 ("Errors lean toward waking") and Open Question #4, defaults are tuned to over-wake:
+  - `heartbeat_interval = 30` ticks (3.0 seconds at 10 Hz, shorter than the 50-tick M4 placeholder so the agent never runs on autopilot for long).
+  - `surprise_threshold = 0.25` in `[0.0, 1.0]` (low threshold so mild prediction errors wake the LLM once T16 supplies scores; `0.0` until then).
+  - `low_energy_threshold = 0.30` and `low_comfort_threshold = 0.30` (waking earlier than `[body]`'s `0.25` baseline as energy or comfort drops).
+  - `boredom_threshold = 0.50` (waking after 25 idle ticks at `0.02`/tick rather than waiting for `0.70`).
+  - `move_threshold = 0.05` meters (minimum displacement for `<id> moves` / `<id> stops moving` condition checks).
+- **Wake triggers and canonical reason codes**:
+  - `"start"`: Initial simulation tick (`is_start=True`), which also seeds `seen_objects`, `seen_property_combos`, and `seen_affordances` from the initial percept.
+  - `"surprise"`: Surprise score `> 0.0` and `>= surprise_threshold` (0 until T16).
+  - `"novelty"`: Any never-seen object ID (`obj.id not in seen_objects`), never-seen perceptible property combination (`_property_combo_signature(obj) not in seen_property_combos`, excluding spatial coordinates/distance/bearing/level), or never-seen affordance token (`action not in seen_affordances`).
+  - `"intent_ended"`: Active controller intent finished (`succeeded` or `failed`).
+  - `"wake_if"`: Agent-set `wake_if` condition matched on the current tick, or a pending unparseable `wake_if` condition causing a wake at the next heartbeat.
+  - `"low_energy"`, `"low_comfort"`, `"boredom"`: Body energy `<= low_energy_threshold`, comfort `<= low_comfort_threshold`, or boredom drive `>= boredom_threshold`.
+  - `"creator_spawn"`, `"mail_arrived"`: Creator spawned an object within the agent's effective sensing radius (`ObjectSpawnedEvent` with `source="creator"`), or mail arrived in the mailbox (`MailArrivedEvent` or creator mailbox state change).
+  - `"heartbeat"`: Periodic timer when `ticks_since_wake >= heartbeat_interval` or `tick % heartbeat_interval == 0`.
+- **`wake_if` condition language (`WakeCondition`, `parse_wake_if`)**:
+  - Case-insensitive grammar supporting:
+    - `<id> moves` (e.g. `object_7 moves`)
+    - `<id> stops moving` (e.g. `object_7 stops moving`)
+    - `<id> disappears` (e.g. `object_7 disappears`)
+    - `new object in range`
+    - `energy below <x>` (`<x>` finite in `[0.0, 1.0]`)
+    - `comfort below <x>` (`<x>` finite in `[0.0, 1.0]`)
+  - Any condition string outside this grammar is preserved as raw text (`WakeCondition(raw=..., kind="unparseable", is_valid=False)`) in `gate.unparseable_wake_if` and causes a wake at the next heartbeat (adding `"wake_if"` alongside `"heartbeat"`) rather than raising or being ignored.
+- **Logged decisions (`GateDecisionEvent`)**: Every `should_wake` call (both `wake=True` and `wake=False` continue decisions) emits a `GateDecisionEvent` (`type="gate_decision"`, `wake`, `reasons`, `outcome="wake" | "continue"`, `surprise`, `matched_wake_if`, `unparseable_wake_if`) on `gate.events` and `world.events` (recorded in `gate.decisions` and `loop.gate_decision_events`) for auditing missed or wasted wakes.
+
+
 

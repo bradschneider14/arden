@@ -92,6 +92,8 @@ EventType = Literal[
     "cycle_frozen",
     "weather_changed",
     "intent_ended",
+    "gate_decision",
+    "mail_arrived",
     "wake",
     "intent_set",
     "llm_error",
@@ -108,6 +110,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "cycle_frozen",
         "weather_changed",
         "intent_ended",
+        "gate_decision",
+        "mail_arrived",
         "wake",
         "intent_set",
         "llm_error",
@@ -124,6 +128,10 @@ _EVENT_TYPE_ALIASES: dict[str, str] = {
     "weather": "weather_changed",
     "weather_change": "weather_changed",
     "set_weather": "weather_changed",
+    "decision": "gate_decision",
+    "mail": "mail_arrived",
+    "letter_arrived": "mail_arrived",
+    "creator_mail": "mail_arrived",
 }
 
 
@@ -407,6 +415,48 @@ class IntentEndedEvent(WorldEvent):
     def outcome(self) -> Literal["succeeded", "failed"]:
         """Alias for ``status``."""
         return self.status
+
+
+class GateDecisionEvent(WorldEvent):
+    """Emitted on every attention gate decision (wake or continue) with its reasons."""
+
+    type: Literal["gate_decision"] = "gate_decision"
+    source: str = "gate"
+    wake: bool = False
+    reasons: list[str] = Field(default_factory=list)
+    decision: Any = None
+    surprise: float = 0.0
+    matched_wake_if: list[str] = Field(default_factory=list)
+    unparseable_wake_if: list[str] = Field(default_factory=list)
+
+    @property
+    def woke(self) -> bool:
+        """Alias for ``wake``."""
+        return self.wake
+
+    @property
+    def continued(self) -> bool:
+        """True when the gate decided to continue without waking the LLM."""
+        return not self.wake
+
+    @property
+    def outcome(self) -> Literal["wake", "continue"]:
+        """Return ``'wake'`` or ``'continue'``."""
+        return "wake" if self.wake else "continue"
+
+    @property
+    def reason(self) -> str | None:
+        """Comma-joined wake reasons, or ``None`` if empty."""
+        return ", ".join(self.reasons) if self.reasons else None
+
+
+class MailArrivedEvent(WorldEvent):
+    """Emitted when a creator message or letter arrives in the mailbox."""
+
+    type: Literal["mail_arrived"] = "mail_arrived"
+    source: str = "creator"
+    text: str | None = None
+    object_id: str | None = None
 
 
 class WakeEvent(WorldEvent):
@@ -715,7 +765,15 @@ class World:
         _set_active_world(self)
 
     def _record_perception_event(self, event: WorldEvent) -> None:
-        if event.type in ("tick", "intent_ended", "wake", "intent_set", "llm_error"):
+        if event.type in (
+            "tick",
+            "intent_ended",
+            "gate_decision",
+            "mail_arrived",
+            "wake",
+            "intent_set",
+            "llm_error",
+        ):
             return
         if event.type == "object_spawned" and not self._has_been_perceived:
             return
