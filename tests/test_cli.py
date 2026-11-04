@@ -1,4 +1,4 @@
-"""CLI entry point: version, help, and the placeholder run command."""
+"""CLI entry point: version, help, headless run, and llm-smoke commands."""
 
 from __future__ import annotations
 
@@ -34,18 +34,28 @@ def test_help_lists_run() -> None:
     assert "run" in completed.stdout
 
 
-def test_run_prints_not_implemented(tmp_path: Path) -> None:
+def test_run_cli_headless_500_ticks_with_mock_llm(tmp_path: Path) -> None:
     completed = subprocess.run(
-        [sys.executable, "-m", "arden", "run"],
+        [sys.executable, "-m", "arden", "run", "--ticks", "500", "--llm", "mock"],
         check=True,
         capture_output=True,
         text=True,
         cwd=tmp_path,
     )
-    assert completed.stdout.strip() == "not implemented yet"
+    lines = [line.strip() for line in completed.stdout.strip().splitlines() if line.strip()]
+    assert len(lines) >= 2
+    assert lines[0].startswith("tick=0 reasons=[start]")
+    for line in lines:
+        assert "tick=" in line
+        assert "reasons=[" in line
+        assert "goal=" in line
+        assert "thought=" in line
+    assert any("heartbeat" in line for line in lines)
 
 
-def test_run_passes_seeded_rng(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_passes_seeded_rng(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     config_path = tmp_path / "arden.toml"
     config_path.write_text("[world]\nseed = 99\n", encoding="utf-8")
     captured: dict[str, object] = {}
@@ -53,7 +63,7 @@ def test_run_passes_seeded_rng(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
     def spy(settings: Settings, rng: random.Random) -> None:
         captured["settings"] = settings
         captured["rng"] = rng
-        print("not implemented yet")
+        print("spy called")
 
     monkeypatch.setattr("arden.__main__.run_simulation", spy)
     code = main(["run", "--config", str(config_path)])
@@ -64,12 +74,17 @@ def test_run_passes_seeded_rng(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
     assert isinstance(rng, random.Random)
     assert settings.world.seed == 99
     assert rng.getstate() == make_rng(settings).getstate()
-    assert capsys.readouterr().out.strip() == "not implemented yet"
+    assert capsys.readouterr().out.strip() == "spy called"
 
 
-def test_run_simulation_placeholder_prints_message(capsys: pytest.CaptureFixture[str]) -> None:
-    run_simulation(Settings(), make_rng(Settings()))
-    assert capsys.readouterr().out.strip() == "not implemented yet"
+def test_run_simulation_prints_wake_summaries(capsys: pytest.CaptureFixture[str]) -> None:
+    settings = Settings()
+    loop = run_simulation(settings, make_rng(settings), ticks=20)
+    out = capsys.readouterr().out.strip()
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert loop.world.tick == 20
+    assert len(lines) == len(loop.wake_summaries)
+    assert lines[0].startswith("tick=0 reasons=[start]")
 
 
 def test_llm_smoke_with_mock_backend_prints_intent_and_latency(

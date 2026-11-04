@@ -56,11 +56,13 @@ class WorldClock:
     def pause(self) -> None:
         """Pause automatic stepping."""
         self.paused = True
+        self.world.paused = True
         self._tick_budget = 0.0
 
     def resume(self) -> None:
         """Resume automatic stepping."""
         self.paused = False
+        self.world.paused = False
 
     def set_speed(self, speed: float) -> None:
         """Set the simulation speed multiplier (must be finite and > 0)."""
