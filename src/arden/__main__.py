@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import random
 import sys
@@ -10,6 +11,12 @@ import time
 from pathlib import Path
 
 from arden import __version__
+from arden.agent.loop import (
+    DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_RUN_TICKS,
+    AgentLoop,
+    run_headless,
+)
 from arden.config import Settings, load_config, make_rng
 from arden.llm.factory import make_backend
 from arden.llm.prompts import build_decide_prompt
@@ -28,6 +35,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to arden.toml. Defaults to ./arden.toml when that file exists.",
     )
+    run_parser.add_argument(
+        "--ticks",
+        type=int,
+        default=None,
+        help=f"Number of simulation ticks to run (default: {DEFAULT_RUN_TICKS}).",
+    )
+    run_parser.add_argument(
+        "--llm",
+        type=str,
+        default=None,
+        help="Override the configured LLM backend (e.g. 'mock' or 'ollama').",
+    )
+    run_parser.add_argument(
+        "--heartbeat",
+        type=int,
+        default=None,
+        help=f"Heartbeat gate interval in ticks (default: {DEFAULT_HEARTBEAT_INTERVAL}).",
+    )
 
     smoke_parser = subparsers.add_parser(
         "llm-smoke",
@@ -42,14 +67,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_simulation(settings: Settings, rng: random.Random) -> None:
-    """Run one simulation.
-
-    ``settings`` and the seeded ``rng`` are the inputs for the world loop.
-    That loop is a later ticket. Until then this command only confirms the
-    wiring: config is loaded, one generator is created, and both are passed here.
-    """
-    print("not implemented yet")
+def run_simulation(
+    settings: Settings,
+    rng: random.Random,
+    *,
+    ticks: int = DEFAULT_RUN_TICKS,
+    heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+) -> AgentLoop:
+    """Run one headless simulation and print a one-line summary per wake."""
+    return run_headless(
+        settings=settings,
+        rng=rng,
+        ticks=ticks,
+        heartbeat_interval=heartbeat_interval,
+        print_wakes=True,
+    )
 
 
 def run_llm_smoke(settings: Settings) -> Intent:
@@ -94,7 +126,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         settings = load_config(args.config)
-        run_simulation(settings, make_rng(settings))
+        if args.llm is not None:
+            settings.llm.backend = args.llm
+        rng = make_rng(settings)
+        kwargs: dict[str, int] = {}
+        sig = inspect.signature(run_simulation)
+        if args.ticks is not None and "ticks" in sig.parameters:
+            kwargs["ticks"] = args.ticks
+        if args.heartbeat is not None and "heartbeat_interval" in sig.parameters:
+            kwargs["heartbeat_interval"] = args.heartbeat
+        run_simulation(settings, rng, **kwargs)
         return 0
     if args.command == "llm-smoke":
         settings = load_config(args.config)

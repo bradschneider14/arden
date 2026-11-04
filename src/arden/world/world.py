@@ -92,6 +92,9 @@ EventType = Literal[
     "cycle_frozen",
     "weather_changed",
     "intent_ended",
+    "wake",
+    "intent_set",
+    "llm_error",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -105,6 +108,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "cycle_frozen",
         "weather_changed",
         "intent_ended",
+        "wake",
+        "intent_set",
+        "llm_error",
         "tick",
     }
 )
@@ -403,6 +409,64 @@ class IntentEndedEvent(WorldEvent):
         return self.status
 
 
+class WakeEvent(WorldEvent):
+    """Emitted when the attention gate wakes the LLM."""
+
+    type: Literal["wake"] = "wake"
+    source: str = "gate"
+    reasons: list[str] = Field(default_factory=list)
+    decision: Any = None
+    percept: Any = None
+
+    @property
+    def reason(self) -> str | None:
+        """Comma-joined wake reasons, or ``None`` if empty."""
+        return ", ".join(self.reasons) if self.reasons else None
+
+
+class IntentSetEvent(WorldEvent):
+    """Emitted when the LLM returns a new Intent and the controller accepts it."""
+
+    type: Literal["intent_set"] = "intent_set"
+    source: str = "agent"
+    intent: Any = None
+    goal: str | None = None
+    thought: str | None = None
+    expect: str | None = None
+    confidence: float | None = None
+    steps: list[Any] = Field(default_factory=list)
+    wake_if: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class LLMErrorEvent(WorldEvent):
+    """Emitted when an LLM call fails (``LLMOutputError`` or timeout)."""
+
+    type: Literal["llm_error"] = "llm_error"
+    source: str = "agent"
+    role: str = "decide"
+    error: str = ""
+    error_type: str = "LLMOutputError"
+    raw: str | None = None
+    kept_intent: Any = None
+    reasons: list[str] = Field(default_factory=list)
+
+    @property
+    def message(self) -> str:
+        """Alias for ``error``."""
+        return self.error
+
+    @property
+    def detail(self) -> str:
+        """Alias for ``error``."""
+        return self.error
+
+    @property
+    def intent(self) -> Any:
+        """Alias for ``kept_intent``."""
+        return self.kept_intent
+
+
 EventHandler = Callable[[WorldEvent], None]
 
 
@@ -611,6 +675,7 @@ class World:
         self.weather._bind_world(self)
 
         self.tick: int = 0
+        self.paused: bool = False
         self._factory = ObjectFactory()
         self.objects: dict[str, WorldObject] = {}
         self.events = EventBus()
@@ -650,7 +715,7 @@ class World:
         _set_active_world(self)
 
     def _record_perception_event(self, event: WorldEvent) -> None:
-        if event.type in ("tick", "intent_ended"):
+        if event.type in ("tick", "intent_ended", "wake", "intent_set", "llm_error"):
             return
         if event.type == "object_spawned" and not self._has_been_perceived:
             return
