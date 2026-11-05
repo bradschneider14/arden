@@ -159,6 +159,9 @@ def format_percept(percept: Percept | PerceivedObject | str | None) -> str:
     if isinstance(percept, str):
         stripped = percept.strip()
         return stripped if stripped else "no changes"
+    if hasattr(percept, "to_text") and callable(percept.to_text):
+        text = str(percept.to_text()).strip()
+        return text if text else "no changes"
     raise TypeError("percept must be a Percept, PerceivedObject, str, or None")
 
 
@@ -201,9 +204,13 @@ def format_previous_intent_result(
 def _format_memory_entry(entry: Any) -> str:
     if isinstance(entry, str):
         return entry.strip()
+    if hasattr(entry, "to_text") and callable(entry.to_text):
+        return str(entry.to_text()).strip()
     if isinstance(entry, Mapping):
         if "text" in entry and isinstance(entry["text"], str):
             return entry["text"].strip()
+        if "summary" in entry and isinstance(entry["summary"], str):
+            return entry["summary"].strip()
         return json.dumps(dict(entry), sort_keys=True, separators=(",", ":"))
     return str(entry).strip()
 
@@ -333,15 +340,23 @@ def build_decide_prompt(
 
 
 def build_reflect_prompt(
-    percept: Percept | PerceivedObject | str | None = None,
+    percept: Percept | PerceivedObject | str | Any = None,
     self_model: str | None = None,
     memories: Sequence[Any] | None = None,
     body_state: BodyPercept | AgentBody | Mapping[str, Any] | str | None = None,
     previous_intent_result: ActionResult | Mapping[str, Any] | str | None = None,
     *,
+    buffer: Any = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> BuiltPrompt:
     """Build the ``reflect`` prompt."""
+    if buffer is not None:
+        if percept is None:
+            percept = buffer
+        if memories is None and hasattr(buffer, "to_prompt_entries"):
+            memories = buffer.to_prompt_entries()
+        elif memories is None and isinstance(buffer, Sequence) and not isinstance(buffer, str):
+            memories = list(buffer)
     return build_prompt(
         "reflect",
         percept=percept,

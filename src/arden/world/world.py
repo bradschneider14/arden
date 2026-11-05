@@ -95,6 +95,8 @@ EventType = Literal[
     "wake",
     "intent_set",
     "llm_error",
+    "buffer_full",
+    "reflection",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -111,6 +113,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "wake",
         "intent_set",
         "llm_error",
+        "buffer_full",
+        "reflection",
         "tick",
     }
 )
@@ -124,6 +128,7 @@ _EVENT_TYPE_ALIASES: dict[str, str] = {
     "weather": "weather_changed",
     "weather_change": "weather_changed",
     "set_weather": "weather_changed",
+    "reflected": "reflection",
 }
 
 
@@ -465,6 +470,30 @@ class LLMErrorEvent(WorldEvent):
     def intent(self) -> Any:
         """Alias for ``kept_intent``."""
         return self.kept_intent
+
+
+class BufferFullEvent(WorldEvent):
+    """Emitted when the short-term memory buffer reaches its configured capacity."""
+
+    type: Literal["buffer_full"] = "buffer_full"
+    source: str = "memory"
+    count: int = 0
+    capacity: int = 40
+    entries: list[Any] = Field(default_factory=list)
+
+    @property
+    def size(self) -> int:
+        """Alias for ``count``."""
+        return self.count
+
+
+class ReflectionEvent(WorldEvent):
+    """Emitted when reflection compresses the short-term buffer into episodes."""
+
+    type: Literal["reflection"] = "reflection"
+    source: str = "memory"
+    trigger: str = "buffer_full"
+    episodes: list[Any] = Field(default_factory=list)
 
 
 EventHandler = Callable[[WorldEvent], None]

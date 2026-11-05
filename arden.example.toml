@@ -106,6 +106,24 @@ wind = ["clear", "rain", "cold", "storm"]
 cold = ["clear", "rain", "wind", "storm"]
 storm = ["rain", "wind", "cold", "clear"]
 
+[memory]
+# Maximum number of entries in the short-term buffer before reflection is triggered.
+buffer_size = 40
+# Consecutive idle (rest) ticks before reflection is triggered.
+rest_idle_ticks = 10
+# Path to the SQLite episodic memory database.
+db_path = "data/memory.db"
+# Per-tick salience decay rate for unrecalled episodes.
+decay_rate = 0.005
+# Minimum salience floor below which episodes are forgotten (deleted).
+salience_floor = 0.1
+# Salience boost applied when an episode is recalled.
+recall_boost = 0.15
+# Salience boost weight for discomfort (1 - comfort).
+discomfort_salience_boost = 0.25
+# Salience boost weight for surprise.
+surprise_salience_boost = 0.35
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"
