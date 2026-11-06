@@ -4,12 +4,35 @@ from __future__ import annotations
 
 import json
 import random
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
+from arden.agent.gate import (
+    DEFAULT_BOREDOM_WAKE_THRESHOLD,
+    DEFAULT_GATE_MOVE_THRESHOLD,
+    DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_LOW_COMFORT_WAKE_THRESHOLD,
+    DEFAULT_LOW_ENERGY_WAKE_THRESHOLD,
+    DEFAULT_SURPRISE_THRESHOLD,
+    Gate,
+    GateConfig,
+    GateContext,
+    GateDecisionEvent,
+    GateSettings,
+    HeartbeatGate,
+    MailArrivedEvent,
+    ParsedWakeCondition,
+    RuleGate,
+    WakeCondition,
+    WakeConditionKind,
+    WakeDecision,
+    _coerce_wake_decision,
+    parse_wake_conditions,
+    parse_wake_if,
+)
 from arden.config import Settings, make_rng
 from arden.controller.controller import Controller, ControllerStatus
 from arden.llm.base import LLMBackend, LLMOutputError
@@ -29,324 +52,7 @@ from arden.world.world import (
     WorldEvent,
 )
 
-DEFAULT_HEARTBEAT_INTERVAL: int = 50
 DEFAULT_RUN_TICKS: int = 500
-
-
-class WakeDecision(BaseModel):
-    """Decision returned by ``Gate.should_wake(context)``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    wake: bool = False
-    reasons: list[str] = Field(default_factory=list)
-
-    def __init__(
-        self,
-        wake: bool = False,
-        reasons: Sequence[str] | str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        if "wake" in kwargs:
-            wake = kwargs.pop("wake")
-        if "reasons" in kwargs:
-            reasons = kwargs.pop("reasons")
-        if isinstance(reasons, str):
-            reason_list = [reasons]
-        elif reasons is None:
-            reason_list = []
-        else:
-            reason_list = [str(r) for r in reasons]
-        super().__init__(wake=bool(wake), reasons=reason_list, **kwargs)
-
-    def __bool__(self) -> bool:
-        return self.wake
-
-    @property
-    def reason(self) -> str | None:
-        """Comma-joined wake reasons, or ``None`` when empty."""
-        return ", ".join(self.reasons) if self.reasons else None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"wake": self.wake, "reasons": list(self.reasons)}
-
-
-def _coerce_wake_decision(value: WakeDecision | tuple[bool, Sequence[str]] | bool | Mapping[str, Any]) -> WakeDecision:
-    if isinstance(value, WakeDecision):
-        return value
-    if isinstance(value, bool):
-        return WakeDecision(wake=value, reasons=["gate"] if value else [])
-    if isinstance(value, tuple) and len(value) == 2:
-        wake_flag, raw_reasons = value
-        return WakeDecision(wake=bool(wake_flag), reasons=raw_reasons)
-    if isinstance(value, Mapping):
-        return WakeDecision(
-            wake=bool(value.get("wake", False)),
-            reasons=value.get("reasons", []),
-        )
-    raise TypeError(f"Gate.should_wake must return a WakeDecision, got {type(value).__name__}")
-
-
-@dataclass
-class GateContext:
-    """Per-tick context passed into ``Gate.should_wake(context)``.
-
-    Supports both attribute access (``context.tick``, ``context.intent_ended``)
-    and mapping access (``context["tick"]``, ``context.get("tick")``).
-    """
-
-    tick: int = 0
-    percept: Percept | None = None
-    world: World | None = None
-    controller: Controller | None = None
-    controller_status: ControllerStatus | None = None
-    active_intent: Intent | None = None
-    is_start: bool = False
-    intent_ended: bool = False
-    intent_ended_event: IntentEndedEvent | None = None
-    ticks_since_wake: int = 0
-    events: list[WorldEvent] = field(default_factory=list)
-
-    @property
-    def start(self) -> bool:
-        """Alias for ``is_start``."""
-        return self.is_start
-
-    @property
-    def at_start(self) -> bool:
-        """Alias for ``is_start``."""
-        return self.is_start
-
-    @property
-    def intent(self) -> Intent | None:
-        """Alias for ``active_intent``."""
-        return self.active_intent
-
-    @property
-    def status(self) -> ControllerStatus | None:
-        """Alias for ``controller_status``."""
-        return self.controller_status
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "tick": self.tick,
-            "percept": self.percept,
-            "world": self.world,
-            "controller": self.controller,
-            "controller_status": self.controller_status,
-            "active_intent": self.active_intent,
-            "is_start": self.is_start,
-            "start": self.is_start,
-            "intent_ended": self.intent_ended,
-            "intent_ended_event": self.intent_ended_event,
-            "ticks_since_wake": self.ticks_since_wake,
-            "events": self.events,
-        }
-
-    def __getitem__(self, key: str) -> Any:
-        d = self.to_dict()
-        if key in d:
-            return d[key]
-        raise KeyError(key)
-
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, str):
-            return False
-        return key in self.to_dict()
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.to_dict().get(key, default)
-
-    def keys(self) -> Iterator[str]:
-        return iter(self.to_dict().keys())
-
-
-@runtime_checkable
-class Gate(Protocol):
-    """Attention gate interface deciding when the LLM should wake and think.
-
-    The gate decides *when* the agent thinks, never *what* it thinks or does.
-    """
-
-    def should_wake(self, context: Any = None, **kwargs: Any) -> WakeDecision:
-        """Return a ``WakeDecision(wake=bool, reasons=list[str])`` for the current tick."""
-        ...
-
-
-class HeartbeatGate:
-    """Placeholder attention gate for M4 (T12).
-
-    Wakes the LLM only:
-    - at start (``"start"``),
-    - when the active intent finishes or fails (``"intent_ended"``), and
-    - on a periodic heartbeat every ``interval`` ticks (``"heartbeat"``).
-
-    The full rule-based gate replaces this in T15 behind the same ``Gate`` interface.
-    """
-
-    def __init__(
-        self,
-        interval: int = DEFAULT_HEARTBEAT_INTERVAL,
-        *,
-        every: int | None = None,
-        every_n_ticks: int | None = None,
-        heartbeat_interval: int | None = None,
-        period: int | None = None,
-        n: int | None = None,
-    ) -> None:
-        resolved = (
-            every
-            if every is not None
-            else every_n_ticks
-            if every_n_ticks is not None
-            else heartbeat_interval
-            if heartbeat_interval is not None
-            else period
-            if period is not None
-            else n
-            if n is not None
-            else interval
-        )
-        if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved <= 0:
-            raise ValueError("heartbeat interval must be a positive integer")
-        self.interval: int = int(resolved)
-        self._started: bool = False
-        self._ticks_since_wake: int = 0
-
-    @property
-    def every_n_ticks(self) -> int:
-        """Alias for ``interval``."""
-        return self.interval
-
-    @property
-    def heartbeat_interval(self) -> int:
-        """Alias for ``interval``."""
-        return self.interval
-
-    @property
-    def ticks_since_wake(self) -> int:
-        """Number of ticks elapsed since the last wake decision."""
-        return self._ticks_since_wake
-
-    def reset(self) -> None:
-        """Reset internal start and heartbeat counters."""
-        self._started = False
-        self._ticks_since_wake = 0
-
-    def should_wake(self, context: Any = None, **kwargs: Any) -> WakeDecision:
-        """Evaluate whether to wake the LLM on this tick."""
-        tick: int | None = kwargs.get("tick")
-        explicit_start: bool | None = kwargs.get("is_start", kwargs.get("start", kwargs.get("at_start")))
-        intent_ended_flag: bool = bool(kwargs.get("intent_ended", False))
-        explicit_ticks_since_wake: int | None = kwargs.get("ticks_since_wake")
-
-        if isinstance(context, GateContext):
-            if tick is None:
-                tick = context.tick
-            if explicit_start is None:
-                explicit_start = context.is_start
-            if not intent_ended_flag:
-                intent_ended_flag = bool(
-                    context.intent_ended
-                    or context.intent_ended_event is not None
-                    or (context.controller_status is not None and context.controller_status.done)
-                    or any(getattr(ev, "type", None) == "intent_ended" for ev in context.events)
-                )
-        elif isinstance(context, Mapping):
-            if tick is None and "tick" in context:
-                raw_t = context.get("tick")
-                if isinstance(raw_t, int) and not isinstance(raw_t, bool):
-                    tick = raw_t
-            if explicit_start is None:
-                for key in ("is_start", "start", "at_start"):
-                    if key in context and context[key] is not None:
-                        explicit_start = bool(context[key])
-                        break
-            if not intent_ended_flag:
-                raw_ie = context.get("intent_ended")
-                st = context.get("controller_status", context.get("status"))
-                ev_list = context.get("events") or ()
-                intent_ended_flag = bool(
-                    raw_ie
-                    or context.get("intent_ended_event") is not None
-                    or (isinstance(st, ControllerStatus) and st.done)
-                    or any(
-                        (getattr(e, "type", None) if not isinstance(e, Mapping) else e.get("type"))
-                        == "intent_ended"
-                        for e in ev_list
-                    )
-                )
-            if explicit_ticks_since_wake is None and "ticks_since_wake" in context:
-                raw_tsw = context.get("ticks_since_wake")
-                if isinstance(raw_tsw, int) and not isinstance(raw_tsw, bool):
-                    explicit_ticks_since_wake = raw_tsw
-        elif context is not None:
-            if tick is None and hasattr(context, "tick"):
-                raw_t = getattr(context, "tick")
-                if isinstance(raw_t, int) and not isinstance(raw_t, bool):
-                    tick = raw_t
-            if explicit_start is None:
-                for attr in ("is_start", "start", "at_start"):
-                    if hasattr(context, attr):
-                        val = getattr(context, attr)
-                        if isinstance(val, bool):
-                            explicit_start = val
-                            break
-            if not intent_ended_flag:
-                if bool(getattr(context, "intent_ended", False)):
-                    intent_ended_flag = True
-                elif getattr(context, "intent_ended_event", None) is not None:
-                    intent_ended_flag = True
-                else:
-                    st = getattr(context, "controller_status", getattr(context, "status", None))
-                    if isinstance(st, ControllerStatus) and st.done:
-                        intent_ended_flag = True
-                    else:
-                        ev_list = getattr(context, "events", None) or ()
-                        if any(getattr(e, "type", None) == "intent_ended" for e in ev_list):
-                            intent_ended_flag = True
-
-        reasons: list[str] = []
-
-        # 1. Wake at start
-        if explicit_start is True:
-            is_start = True
-        elif explicit_start is False:
-            is_start = False if (tick is not None and tick != 0) else (not self._started and tick == 0)
-        else:
-            is_start = (not self._started) and (tick is None or tick == 0)
-
-        self._started = True
-        if is_start:
-            reasons.append("start")
-
-        # 2. Wake on intent_ended
-        if intent_ended_flag:
-            reasons.append("intent_ended")
-
-        # 3. Wake on heartbeat (every N ticks)
-        next_ticks_since_wake = (
-            explicit_ticks_since_wake
-            if explicit_ticks_since_wake is not None
-            else (0 if is_start else self._ticks_since_wake + 1)
-        )
-        is_heartbeat = False
-        if not is_start:
-            if tick is not None and tick > 0 and (tick % self.interval == 0):
-                is_heartbeat = True
-            elif next_ticks_since_wake >= self.interval:
-                is_heartbeat = True
-
-        if is_heartbeat:
-            reasons.append("heartbeat")
-
-        wake = bool(reasons)
-        if wake:
-            self._ticks_since_wake = 0
-        else:
-            self._ticks_since_wake = next_ticks_since_wake
-
-        return WakeDecision(wake=wake, reasons=reasons)
 
 
 @dataclass
@@ -512,7 +218,7 @@ class AgentLoop:
 
     Each tick executes:
     1. ``perceive`` -> structured ``Percept``
-    2. ``gate.should_wake(context)`` -> ``WakeDecision``
+    2. ``gate.should_wake(context)`` -> ``WakeDecision`` (emitting ``gate_decision``)
     3. If ``wake``: pause world, call LLM ``decide``, set the new ``Intent`` on the controller
        (or on ``LLMOutputError`` / timeout, emit ``llm_error`` and keep the current intent or idle)
     4. ``controller.tick(world)``
@@ -530,7 +236,7 @@ class AgentLoop:
         clock: WorldClock | None = None,
         settings: Settings | None = None,
         rng: random.Random | None = None,
-        heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+        heartbeat_interval: int | None = None,
         timeout_s: float | None = None,
         self_model: str | None = None,
         memories: Sequence[Any] | None = None,
@@ -554,7 +260,13 @@ class AgentLoop:
             resolved_llm if resolved_llm is not None else make_backend(self.settings)
         )
         self.gate: Gate = (
-            gate if gate is not None else HeartbeatGate(interval=heartbeat_interval)
+            gate
+            if gate is not None
+            else RuleGate(
+                config=self.settings.gate,
+                heartbeat_interval=heartbeat_interval,
+                world=self.world,
+            )
         )
         self.controller: Controller = (
             controller if controller is not None else Controller(world=self.world)
@@ -577,6 +289,7 @@ class AgentLoop:
 
         self.paused: bool = False
         self.ticks_run: int = 0
+        self.gate_decision_events: list[GateDecisionEvent] = []
         self.wake_events: list[WakeEvent] = []
         self.intent_set_events: list[IntentSetEvent] = []
         self.llm_error_events: list[LLMErrorEvent] = []
@@ -593,7 +306,11 @@ class AgentLoop:
         self.world.events.subscribe(self._on_world_event)
 
     def _on_world_event(self, event: WorldEvent) -> None:
-        if event.type not in ("tick", "wake", "intent_set", "llm_error"):
+        if isinstance(event, GateDecisionEvent) or event.type == "gate_decision":
+            if isinstance(event, GateDecisionEvent):
+                self.gate_decision_events.append(event)
+            return
+        if event.type not in ("tick", "wake", "intent_set", "llm_error", "gate_decision"):
             self._tick_events.append(event)
         if isinstance(event, IntentEndedEvent) or event.type == "intent_ended":
             self._pending_intent_ended = True
@@ -602,13 +319,23 @@ class AgentLoop:
                 self._last_completed_intent_event = event
 
     @property
+    def gate_decisions(self) -> list[GateDecisionEvent]:
+        """Alias for ``gate_decision_events``."""
+        return self.gate_decision_events
+
+    @property
+    def decision_events(self) -> list[GateDecisionEvent]:
+        """Alias for ``gate_decision_events``."""
+        return self.gate_decision_events
+
+    @property
     def backend(self) -> LLMBackend:
         """Alias for ``llm``."""
         return self.llm
 
     @property
     def events(self) -> EventBus:
-        """World event bus carrying ``wake``, ``intent_set``, ``llm_error``, ``intent_ended``, etc."""
+        """World event bus carrying ``gate_decision``, ``wake``, ``intent_set``, ``llm_error``, ``intent_ended``, etc."""
         return self.world.events
 
     @property
@@ -674,6 +401,9 @@ class AgentLoop:
             percept = perceive(self.world)
 
         # 2. Gate decides wake or continue
+        surprise_val = float(
+            getattr(self.world, "surprise", getattr(self.world, "surprise_score", 0.0)) or 0.0
+        )
         context = GateContext(
             tick=current_tick,
             percept=percept,
@@ -686,6 +416,7 @@ class AgentLoop:
             intent_ended_event=self._pending_intent_ended_event,
             ticks_since_wake=self._ticks_since_wake,
             events=list(self._tick_events),
+            surprise=surprise_val,
         )
         self._has_started = True
         self._pending_intent_ended = False
@@ -693,6 +424,20 @@ class AgentLoop:
         self._tick_events.clear()
 
         decision = _coerce_wake_decision(self.gate.should_wake(context))
+        if self.world.events not in getattr(decision, "_emitted_buses", ()):
+            decision_event = GateDecisionEvent(
+                tick=current_tick,
+                source="gate",
+                wake=decision.wake,
+                reasons=list(decision.reasons),
+                decision=decision,
+                surprise=surprise_val,
+                matched_wake_if=list(decision.matched_wake_if),
+                unparseable_wake_if=list(decision.unparseable_wake_if),
+            )
+            decision._emitted_event = decision_event
+            self.world.events.emit(decision_event)
+
         llm_error: Exception | None = None
         summary: str | None = None
 
@@ -761,6 +506,8 @@ class AgentLoop:
                 )
             else:
                 self.controller.set_intent(new_intent)
+                if hasattr(self.gate, "set_wake_if"):
+                    self.gate.set_wake_if(new_intent.wake_if)
                 intent_event = IntentSetEvent(
                     tick=current_tick,
                     source="agent",
@@ -848,7 +595,7 @@ def run_headless(
     world: World | None = None,
     gate: Gate | None = None,
     controller: Controller | None = None,
-    heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+    heartbeat_interval: int | None = None,
     print_wakes: bool = True,
 ) -> AgentLoop:
     """Run a headless simulation for ``ticks`` ticks and return the ``AgentLoop``."""
@@ -878,24 +625,39 @@ run_loop = run_headless
 run_agent_loop = run_headless
 
 __all__ = [
+    "DEFAULT_BOREDOM_WAKE_THRESHOLD",
+    "DEFAULT_GATE_MOVE_THRESHOLD",
     "DEFAULT_HEARTBEAT_INTERVAL",
+    "DEFAULT_LOW_COMFORT_WAKE_THRESHOLD",
+    "DEFAULT_LOW_ENERGY_WAKE_THRESHOLD",
     "DEFAULT_RUN_TICKS",
+    "DEFAULT_SURPRISE_THRESHOLD",
     "AgentLoop",
     "Gate",
+    "GateConfig",
     "GateContext",
+    "GateDecisionEvent",
+    "GateSettings",
     "HeadlessLoop",
     "HeartbeatGate",
     "IntentEndedEvent",
     "IntentSetEvent",
     "LLMErrorEvent",
     "Loop",
+    "MailArrivedEvent",
+    "ParsedWakeCondition",
+    "RuleGate",
     "TickResult",
+    "WakeCondition",
+    "WakeConditionKind",
     "WakeDecision",
     "WakeEvent",
     "build_test_world",
     "create_test_world",
     "format_wake_summary",
     "make_test_world",
+    "parse_wake_conditions",
+    "parse_wake_if",
     "run_agent_loop",
     "run_headless",
     "run_loop",

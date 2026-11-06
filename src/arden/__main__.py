@@ -72,7 +72,7 @@ def run_simulation(
     rng: random.Random,
     *,
     ticks: int = DEFAULT_RUN_TICKS,
-    heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+    heartbeat_interval: int | None = None,
 ) -> AgentLoop:
     """Run one headless simulation and print a one-line summary per wake."""
     return run_headless(
