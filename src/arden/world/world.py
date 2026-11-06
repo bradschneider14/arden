@@ -99,6 +99,7 @@ EventType = Literal[
     "llm_error",
     "buffer_full",
     "reflection",
+    "belief_evicted",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -119,6 +120,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "llm_error",
         "buffer_full",
         "reflection",
+        "belief_evicted",
         "tick",
     }
 )
@@ -133,6 +135,9 @@ _EVENT_TYPE_ALIASES: dict[str, str] = {
     "weather_change": "weather_changed",
     "set_weather": "weather_changed",
     "reflected": "reflection",
+    "belief_eviction": "belief_evicted",
+    "eviction": "belief_evicted",
+    "belief_forgotten": "belief_evicted",
     "decision": "gate_decision",
     "mail": "mail_arrived",
     "letter_arrived": "mail_arrived",
@@ -538,12 +543,34 @@ class BufferFullEvent(WorldEvent):
 
 
 class ReflectionEvent(WorldEvent):
-    """Emitted when reflection compresses the short-term buffer into episodes."""
+    """Emitted when reflection compresses the short-term buffer into episodes, beliefs, and self-model."""
 
     type: Literal["reflection"] = "reflection"
     source: str = "memory"
     trigger: str = "buffer_full"
     episodes: list[Any] = Field(default_factory=list)
+    beliefs: list[Any] = Field(default_factory=list)
+    self_model: str | None = None
+
+
+class BeliefEvictedEvent(WorldEvent):
+    """Emitted when a semantic belief is evicted because the belief set reached its hard cap."""
+
+    type: Literal["belief_evicted"] = "belief_evicted"
+    source: str = "memory"
+    belief: Any = None
+    belief_id: int | None = None
+    statement: str = ""
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    recency: float = 0.0
+    score: float = 0.0
+    cap: int = 0
+
+    @property
+    def evicted_belief(self) -> Any:
+        """Alias for ``belief``."""
+        return self.belief
 
 
 EventHandler = Callable[[WorldEvent], None]

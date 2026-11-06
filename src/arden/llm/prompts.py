@@ -209,10 +209,31 @@ def _format_memory_entry(entry: Any) -> str:
     if isinstance(entry, Mapping):
         if "text" in entry and isinstance(entry["text"], str):
             return entry["text"].strip()
+        if "statement" in entry and isinstance(entry["statement"], str):
+            return entry["statement"].strip()
         if "summary" in entry and isinstance(entry["summary"], str):
             return entry["summary"].strip()
         return json.dumps(dict(entry), sort_keys=True, separators=(",", ":"))
     return str(entry).strip()
+
+
+def _format_self_model(self_model: Any, *, fallback_source: Any = None) -> str:
+    from arden.memory.beliefs import truncate_self_model
+
+    val = self_model
+    if val is None and fallback_source is not None:
+        val = getattr(fallback_source, "self_model", None)
+    if val is None:
+        return "none"
+    if hasattr(val, "text") and isinstance(getattr(val, "text"), str):
+        raw_text = str(getattr(val, "text")).strip()
+    elif isinstance(val, str):
+        raw_text = val.strip()
+    else:
+        raw_text = str(val).strip()
+    if not raw_text or raw_text.lower() == "none":
+        return "none"
+    return truncate_self_model(raw_text)
 
 
 def _assemble_user_prompt(
@@ -244,11 +265,18 @@ def build_prompt(
     role: str,
     *,
     percept: Percept | PerceivedObject | str | None = None,
-    self_model: str | None = None,
+    self_model: str | Any = None,
     memories: Sequence[Any] | None = None,
     body_state: BodyPercept | AgentBody | Mapping[str, Any] | str | None = None,
     previous_intent_result: ActionResult | Mapping[str, Any] | str | None = None,
     target: str | PerceivedObject | WorldObject | None = None,
+    context_tags: Sequence[str] | str | None = None,
+    k: int | None = None,
+    memory: Any = None,
+    store: Any = None,
+    belief_store: Any = None,
+    episode_store: Any = None,
+    embedding_fn: Any = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> BuiltPrompt:
     """Build a ``(system, user)`` prompt for ``decide``, ``reflect``, or ``name``.
@@ -256,7 +284,7 @@ def build_prompt(
     Includes:
     - the percept text (delta)
     - the self-model
-    - a handful of retrieved memories (empty list until M5)
+    - top-k retrieved memories (when ``memories`` is provided or retrieved from memory stores)
     - current body state (plain numbers, no good/bad labels)
     - the previous intent result
 
@@ -268,6 +296,8 @@ def build_prompt(
     if max_tokens <= 0:
         raise ValueError("max_tokens must be > 0")
 
+    from arden.config import DEFAULT_RETRIEVAL_K
+    from arden.memory.beliefs import extract_context_tags, retrieve
     from arden.perception.feed import PerceivedObject, Percept
 
     if body_state is None and isinstance(percept, Percept):
@@ -286,10 +316,39 @@ def build_prompt(
     system = _SYSTEM_PROMPTS[role]
     percept_str = format_percept(percept)
     body_str = format_body_state(body_state)
-    self_model_str = self_model.strip() if isinstance(self_model, str) and self_model.strip() else "none"
+    self_model_str = _format_self_model(
+        self_model,
+        fallback_source=memory if memory is not None else store,
+    )
     prev_result_str = format_previous_intent_result(previous_intent_result)
 
-    raw_memories = [_format_memory_entry(m) for m in (memories or ()) if _format_memory_entry(m)]
+    resolved_memories: Sequence[Any]
+    if memories is not None:
+        resolved_memories = memories
+    elif role == "decide" or any(
+        x is not None for x in (context_tags, k, memory, store, belief_store, episode_store)
+    ):
+        tags = (
+            extract_context_tags(context_tags)
+            if context_tags is not None
+            else extract_context_tags(percept)
+        )
+        eff_k = int(k) if k is not None else DEFAULT_RETRIEVAL_K
+        tick_val = getattr(percept, "tick", None) if percept is not None else None
+        resolved_memories = retrieve(
+            tags,
+            eff_k,
+            store=store,
+            belief_store=belief_store,
+            episode_store=episode_store,
+            manager=memory,
+            current_tick=tick_val,
+            embedding_fn=embedding_fn,
+        )
+    else:
+        resolved_memories = ()
+
+    raw_memories = [_format_memory_entry(m) for m in (resolved_memories or ()) if _format_memory_entry(m)]
 
     # Token-budget guard: truncate memories from the tail first
     kept_memories = list(raw_memories)
@@ -320,14 +379,21 @@ def build_prompt(
 
 def build_decide_prompt(
     percept: Percept | PerceivedObject | str | None = None,
-    self_model: str | None = None,
+    self_model: str | Any = None,
     memories: Sequence[Any] | None = None,
     body_state: BodyPercept | AgentBody | Mapping[str, Any] | str | None = None,
     previous_intent_result: ActionResult | Mapping[str, Any] | str | None = None,
     *,
+    context_tags: Sequence[str] | str | None = None,
+    k: int | None = None,
+    memory: Any = None,
+    store: Any = None,
+    belief_store: Any = None,
+    episode_store: Any = None,
+    embedding_fn: Any = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> BuiltPrompt:
-    """Build the ``decide`` prompt."""
+    """Build the ``decide`` prompt including the self-model and top-k retrieved memories."""
     return build_prompt(
         "decide",
         percept=percept,
@@ -335,6 +401,13 @@ def build_decide_prompt(
         memories=memories,
         body_state=body_state,
         previous_intent_result=previous_intent_result,
+        context_tags=context_tags,
+        k=k,
+        memory=memory,
+        store=store,
+        belief_store=belief_store,
+        episode_store=episode_store,
+        embedding_fn=embedding_fn,
         max_tokens=max_tokens,
     )
 

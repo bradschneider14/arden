@@ -37,8 +37,16 @@ from arden.config import Settings, make_rng
 from arden.controller.controller import Controller, ControllerStatus
 from arden.llm.base import LLMBackend, LLMOutputError
 from arden.llm.factory import make_backend
-from arden.llm.prompts import build_decide_prompt
+from arden.llm.prompts import BuiltPrompt, build_decide_prompt
 from arden.llm.schemas import Intent
+from arden.memory.beliefs import (
+    BeliefStore,
+    SelfModel,
+    extract_context_tags,
+    retrieve,
+)
+from arden.memory.short_term import MemoryManager
+from arden.memory.store import EpisodeStore
 from arden.perception.feed import Percept, PerceptionTracker, perceive
 from arden.world.clock import WorldClock
 from arden.world.objects import BehaviorRule, Position
@@ -66,6 +74,7 @@ class TickResult:
     intent: Intent | None = None
     llm_error: Exception | None = None
     summary: str | None = None
+    prompt: BuiltPrompt | None = None
 
     @property
     def woke(self) -> bool:
@@ -238,8 +247,14 @@ class AgentLoop:
         rng: random.Random | None = None,
         heartbeat_interval: int | None = None,
         timeout_s: float | None = None,
-        self_model: str | None = None,
+        self_model: str | SelfModel | None = None,
         memories: Sequence[Any] | None = None,
+        memory: MemoryManager | None = None,
+        store: EpisodeStore | None = None,
+        episode_store: EpisodeStore | None = None,
+        belief_store: BeliefStore | None = None,
+        retrieval_k: int | None = None,
+        k: int | None = None,
         perception_tracker: PerceptionTracker | None = None,
         on_wake: Callable[[str], None] | None = None,
         print_wakes: bool = False,
@@ -281,7 +296,36 @@ class AgentLoop:
             if timeout_s is not None
             else float(self.settings.llm.timeout_s)
         )
-        self.self_model: str = self_model if self_model is not None else "none"
+        self.memory: MemoryManager | None = memory
+        self.episode_store: EpisodeStore | None = (
+            episode_store
+            if episode_store is not None
+            else (store if store is not None else (memory.store if memory is not None else None))
+        )
+        self.belief_store: BeliefStore | None = (
+            belief_store
+            if belief_store is not None
+            else (
+                memory.belief_store
+                if memory is not None
+                else (self.episode_store.belief_store if self.episode_store is not None else None)
+            )
+        )
+        self.retrieval_k: int = (
+            int(retrieval_k)
+            if retrieval_k is not None
+            else (int(k) if k is not None else int(self.settings.memory.retrieval_k))
+        )
+        if isinstance(self_model, SelfModel):
+            self.self_model_store: SelfModel | None = self_model
+            self.self_model: str = self_model.text or "none"
+        else:
+            self.self_model_store = (
+                memory.self_model_store
+                if memory is not None
+                else (self.episode_store.self_model_store if self.episode_store is not None else None)
+            )
+            self.self_model = self_model if self_model is not None else "none"
         self.memories: list[Any] = list(memories or ())
         self.perception_tracker: PerceptionTracker | None = perception_tracker
         self.on_wake: Callable[[str], None] | None = on_wake
@@ -294,6 +338,8 @@ class AgentLoop:
         self.intent_set_events: list[IntentSetEvent] = []
         self.llm_error_events: list[LLMErrorEvent] = []
         self.wake_summaries: list[str] = []
+        self.last_decide_prompt: BuiltPrompt | None = None
+        self.last_retrieved_memories: list[Any] = []
 
         self._has_started: bool = False
         self._ticks_since_wake: int = 0
@@ -440,6 +486,7 @@ class AgentLoop:
 
         llm_error: Exception | None = None
         summary: str | None = None
+        built_prompt: BuiltPrompt | None = None
 
         # 3. If wake: pause world, call LLM decide, set the new intent (or survive LLM failure)
         if decision.wake:
@@ -456,13 +503,44 @@ class AgentLoop:
 
             self._pause_world()
             try:
+                effective_self_model: str | SelfModel | None = self.self_model
+                if (
+                    effective_self_model in (None, "", "none")
+                    and self.self_model_store is not None
+                    and self.self_model_store.text
+                ):
+                    effective_self_model = self.self_model_store.text
+                elif (
+                    effective_self_model in (None, "", "none")
+                    and self.memory is not None
+                    and self.memory.self_model
+                ):
+                    effective_self_model = self.memory.self_model
+
+                context_tags = extract_context_tags(percept)
+                retrieved = retrieve(
+                    context_tags,
+                    self.retrieval_k,
+                    episode_store=self.episode_store,
+                    belief_store=self.belief_store,
+                    manager=self.memory,
+                    memories=self.memories if self.memories else None,
+                    current_tick=current_tick,
+                )
+                self.last_retrieved_memories = list(retrieved)
+                prompt_memories = retrieved if retrieved else (self.memories if self.memories else None)
+
                 prompt = build_decide_prompt(
                     percept=percept,
-                    self_model=self.self_model,
-                    memories=self.memories,
+                    self_model=effective_self_model,
+                    memories=prompt_memories,
                     body_state=percept.body,
                     previous_intent_result=self._previous_intent_result_payload(),
+                    context_tags=context_tags,
+                    k=self.retrieval_k,
                 )
+                built_prompt = prompt
+                self.last_decide_prompt = prompt
                 raw_intent = self.llm.complete_json(
                     "decide",
                     prompt.system,
@@ -561,6 +639,7 @@ class AgentLoop:
             intent=self.controller.intent if not controller_status.done else controller_status.intent,
             llm_error=llm_error,
             summary=summary,
+            prompt=built_prompt,
         )
 
     step = tick

@@ -14,5 +14,20 @@
       "surprise_kind": null,
       "made_by_agent": ["object_8"]
     }
-  ]
+  ],
+  "beliefs": [
+    {
+      "statement": "Pushing sphere object_7 causes it to roll across flat ground toward object_1.",
+      "tags": ["object_7", "object_1", "push", "sphere"],
+      "action": "propose",
+      "confidence": 0.65
+    },
+    {
+      "statement": "Binding object_4 and object_5 produces a combined structure object_8.",
+      "tags": ["object_4", "object_5", "object_8", "bind"],
+      "action": "propose",
+      "confidence": 0.6
+    }
+  ],
+  "self_model": "I explore nearby objects by pushing spheres to observe how far they roll and binding long objects together into new structures."
 }

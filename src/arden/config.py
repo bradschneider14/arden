@@ -6,7 +6,7 @@ import random
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from arden.agent.gate import GateConfig, GateSettings
 from arden.environment.body import BodyConfig, BodySettings
@@ -23,10 +23,17 @@ DEFAULT_SALIENCE_FLOOR: float = 0.10
 DEFAULT_RECALL_BOOST: float = 0.15
 DEFAULT_DISCOMFORT_SALIENCE_BOOST: float = 0.25
 DEFAULT_SURPRISE_SALIENCE_BOOST: float = 0.35
+DEFAULT_MAX_BELIEFS: int = 32
+DEFAULT_INITIAL_BELIEF_CONFIDENCE: float = 0.50
+DEFAULT_BELIEF_SUPPORT_DELTA: float = 0.15
+DEFAULT_BELIEF_CONTRADICT_DELTA: float = 0.20
+DEFAULT_RECENCY_DECAY_RATE: float = 0.01
+DEFAULT_MAX_SELF_MODEL_WORDS: int = 80
+DEFAULT_RETRIEVAL_K: int = 5
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for the short-term buffer, reflection, and episodic store under ``[memory]``."""
+    """Configuration for the short-term buffer, reflection, episodic store, beliefs, self-model, and retrieval under ``[memory]``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -42,6 +49,37 @@ class MemoryConfig(BaseModel):
     surprise_salience_boost: float = Field(
         default=DEFAULT_SURPRISE_SALIENCE_BOOST, ge=0.0, le=1.0
     )
+    max_beliefs: int = Field(default=DEFAULT_MAX_BELIEFS, gt=0)
+    initial_belief_confidence: float = Field(
+        default=DEFAULT_INITIAL_BELIEF_CONFIDENCE, ge=0.0, le=1.0
+    )
+    belief_support_delta: float = Field(
+        default=DEFAULT_BELIEF_SUPPORT_DELTA, gt=0.0, le=1.0
+    )
+    belief_contradict_delta: float = Field(
+        default=DEFAULT_BELIEF_CONTRADICT_DELTA, gt=0.0, le=1.0
+    )
+    recency_decay_rate: float = Field(
+        default=DEFAULT_RECENCY_DECAY_RATE, ge=0.0, le=1.0
+    )
+    max_self_model_words: int = Field(default=DEFAULT_MAX_SELF_MODEL_WORDS, gt=0)
+    retrieval_k: int = Field(default=DEFAULT_RETRIEVAL_K, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_aliases(cls, values: object) -> object:
+        if not isinstance(values, dict):
+            return values
+        raw = dict(values)
+        if "belief_cap" in raw and "max_beliefs" not in raw:
+            raw["max_beliefs"] = raw.pop("belief_cap")
+        if "belief_limit" in raw and "max_beliefs" not in raw:
+            raw["max_beliefs"] = raw.pop("belief_limit")
+        if "self_model_max_words" in raw and "max_self_model_words" not in raw:
+            raw["max_self_model_words"] = raw.pop("self_model_max_words")
+        if "top_k" in raw and "retrieval_k" not in raw:
+            raw["retrieval_k"] = raw.pop("top_k")
+        return raw
 
     @field_validator("db_path", mode="before")
     @classmethod
@@ -91,6 +129,26 @@ class MemoryConfig(BaseModel):
     def min_salience(self) -> float:
         """Alias for ``salience_floor``."""
         return self.salience_floor
+
+    @property
+    def belief_cap(self) -> int:
+        """Alias for ``max_beliefs``."""
+        return self.max_beliefs
+
+    @property
+    def belief_limit(self) -> int:
+        """Alias for ``max_beliefs``."""
+        return self.max_beliefs
+
+    @property
+    def self_model_max_words(self) -> int:
+        """Alias for ``max_self_model_words``."""
+        return self.max_self_model_words
+
+    @property
+    def top_k(self) -> int:
+        """Alias for ``retrieval_k``."""
+        return self.retrieval_k
 
 
 MemorySettings = MemoryConfig
