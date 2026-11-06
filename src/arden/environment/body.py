@@ -1145,6 +1145,7 @@ class BodyStateSystem:
             if resting is not None
             else (verb in ("rest", "idle") or self.resting)
         )
+        self._last_step_resting = bool(is_rest)
 
         # 1. Energy update: rest restores energy; otherwise passive time drain + any verb activity drain
         if is_rest and (verb is None or verb in ("rest", "idle")):

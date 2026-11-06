@@ -15,6 +15,85 @@ from arden.environment.weather import WeatherConfig, WeatherSettings
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 DEFAULT_CONFIG_PATH = Path("arden.toml")
+DEFAULT_BUFFER_SIZE: int = 40
+DEFAULT_REST_IDLE_TICKS: int = 10
+DEFAULT_DB_PATH: Path = Path("data/memory.db")
+DEFAULT_DECAY_RATE: float = 0.005
+DEFAULT_SALIENCE_FLOOR: float = 0.10
+DEFAULT_RECALL_BOOST: float = 0.15
+DEFAULT_DISCOMFORT_SALIENCE_BOOST: float = 0.25
+DEFAULT_SURPRISE_SALIENCE_BOOST: float = 0.35
+
+
+class MemoryConfig(BaseModel):
+    """Configuration for the short-term buffer, reflection, and episodic store under ``[memory]``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    buffer_size: int = Field(default=DEFAULT_BUFFER_SIZE, gt=0)
+    rest_idle_ticks: int = Field(default=DEFAULT_REST_IDLE_TICKS, gt=0)
+    db_path: Path = Field(default=DEFAULT_DB_PATH)
+    decay_rate: float = Field(default=DEFAULT_DECAY_RATE, ge=0.0, le=1.0)
+    salience_floor: float = Field(default=DEFAULT_SALIENCE_FLOOR, ge=0.0, le=1.0)
+    recall_boost: float = Field(default=DEFAULT_RECALL_BOOST, ge=0.0, le=1.0)
+    discomfort_salience_boost: float = Field(
+        default=DEFAULT_DISCOMFORT_SALIENCE_BOOST, ge=0.0, le=1.0
+    )
+    surprise_salience_boost: float = Field(
+        default=DEFAULT_SURPRISE_SALIENCE_BOOST, ge=0.0, le=1.0
+    )
+
+    @field_validator("db_path", mode="before")
+    @classmethod
+    def _validate_db_path(cls, value: object) -> Path:
+        if isinstance(value, Path):
+            if not str(value).strip():
+                raise ValueError("db_path must be a non-empty path")
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("db_path must be a non-empty string")
+            return Path(stripped)
+        raise TypeError("db_path must be a Path or str")
+
+    @property
+    def capacity(self) -> int:
+        """Alias for ``buffer_size``."""
+        return self.buffer_size
+
+    @property
+    def short_term_size(self) -> int:
+        """Alias for ``buffer_size``."""
+        return self.buffer_size
+
+    @property
+    def max_size(self) -> int:
+        """Alias for ``buffer_size``."""
+        return self.buffer_size
+
+    @property
+    def idle_ticks(self) -> int:
+        """Alias for ``rest_idle_ticks``."""
+        return self.rest_idle_ticks
+
+    @property
+    def rest_ticks(self) -> int:
+        """Alias for ``rest_idle_ticks``."""
+        return self.rest_idle_ticks
+
+    @property
+    def floor(self) -> float:
+        """Alias for ``salience_floor``."""
+        return self.salience_floor
+
+    @property
+    def min_salience(self) -> float:
+        """Alias for ``salience_floor``."""
+        return self.salience_floor
+
+
+MemorySettings = MemoryConfig
 
 
 class WorldSettings(BaseModel):
@@ -86,6 +165,7 @@ class Settings(BaseModel):
     daynight: DayNightSettings = Field(default_factory=DayNightSettings)
     body: BodySettings = Field(default_factory=BodySettings)
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
+    memory: MemorySettings = Field(default_factory=MemorySettings)
     gate: GateSettings = Field(default_factory=GateSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
@@ -133,6 +213,8 @@ __all__ = [
     "GateSettings",
     "LlmSettings",
     "LoggingSettings",
+    "MemoryConfig",
+    "MemorySettings",
     "PerceptionSettings",
     "Settings",
     "WeatherConfig",
