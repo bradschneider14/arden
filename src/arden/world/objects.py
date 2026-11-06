@@ -56,6 +56,7 @@ _HIDDEN_OBJECT_FIELDS = frozenset(
         "fixed",
         "binding",
         "rigidity",
+        "creator_label",
         "parts",
         "binder",
         "join_type",
@@ -300,6 +301,7 @@ class WorldObject(BaseModel):
     fragile: bool = False
     color: str | None = None
     fixed: bool = False
+    creator_label: str | None = None
     velocity: Velocity = Field(default_factory=Velocity)
     state: dict[str, Any] = Field(default_factory=dict)
     behavior: list[BehaviorRule] = Field(default_factory=list)
@@ -357,6 +359,16 @@ class WorldObject(BaseModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("color must be a non-empty string")
+        return stripped
+
+    @field_validator("creator_label")
+    @classmethod
+    def creator_label_is_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("creator_label must be a non-empty string")
         return stripped
 
     @field_validator("state")
