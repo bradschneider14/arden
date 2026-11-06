@@ -6,6 +6,7 @@ import json
 import random
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -49,6 +50,7 @@ from arden.memory.short_term import MemoryManager
 from arden.memory.store import EpisodeStore
 from arden.perception.feed import Percept, PerceptionTracker, perceive
 from arden.world.clock import WorldClock
+from arden.world.loader import load_first_run_world, load_world
 from arden.world.objects import BehaviorRule, Position
 from arden.world.world import (
     EventBus,
@@ -236,7 +238,7 @@ class AgentLoop:
 
     def __init__(
         self,
-        world: World | None = None,
+        world: World | Path | str | Mapping[str, Any] | None = None,
         llm: LLMBackend | None = None,
         *,
         backend: LLMBackend | None = None,
@@ -263,13 +265,14 @@ class AgentLoop:
         self.rng: random.Random = (
             rng
             if rng is not None
-            else (world.rng if world is not None else make_rng(self.settings))
+            else (world.rng if isinstance(world, World) else make_rng(self.settings))
         )
-        self.world: World = (
-            world
-            if world is not None
-            else build_test_world(rng=self.rng, settings=self.settings)
-        )
+        if world is None:
+            self.world: World = build_test_world(rng=self.rng, settings=self.settings)
+        elif isinstance(world, World):
+            self.world = world
+        else:
+            self.world = load_world(world, rng=self.rng, settings=self.settings)
         resolved_llm = llm if llm is not None else backend
         self.llm: LLMBackend = (
             resolved_llm if resolved_llm is not None else make_backend(self.settings)
@@ -671,7 +674,7 @@ def run_headless(
     *,
     ticks: int = DEFAULT_RUN_TICKS,
     llm: LLMBackend | str | None = None,
-    world: World | None = None,
+    world: World | Path | str | Mapping[str, Any] | None = None,
     gate: Gate | None = None,
     controller: Controller | None = None,
     heartbeat_interval: int | None = None,

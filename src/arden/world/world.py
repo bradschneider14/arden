@@ -846,6 +846,23 @@ class World:
         return self.events
 
     @property
+    def creator_labels(self) -> dict[str, str]:
+        """Mapping of ``object_id -> creator_label`` for the web client and observer log.
+
+        Never exposed through ``WorldObject.perceptible()`` or agent perception.
+        """
+        return {
+            obj_id: obj.creator_label
+            for obj_id, obj in sorted(self.objects.items())
+            if obj.creator_label is not None
+        }
+
+    def creator_label_for(self, object_id: str) -> str | None:
+        """Return the ``creator_label`` for ``object_id``, or ``None`` if unset or missing."""
+        obj = self.objects.get(object_id)
+        return obj.creator_label if obj is not None else None
+
+    @property
     def day_night(self) -> DayNightCycle:
         """Alias for ``daynight``."""
         return self.daynight
@@ -2111,6 +2128,7 @@ class World:
                         )
                         if prevent_ledge_entry and id_b in prevent_ledge_entry and self.terrain.is_ledge(cand_b):
                             cand_b = self._clamp_out_of_ledge(b.position, cand_b)
+                        cand_b = self._clamp_to_grid_bounds(b.position, cand_b, b.radius)
                         self.objects[id_b] = b.model_copy(update={"position": cand_b})
                     elif b.fixed:
                         cand_a = Position(
@@ -2119,6 +2137,7 @@ class World:
                         )
                         if prevent_ledge_entry and id_a in prevent_ledge_entry and self.terrain.is_ledge(cand_a):
                             cand_a = self._clamp_out_of_ledge(a.position, cand_a)
+                        cand_a = self._clamp_to_grid_bounds(a.position, cand_a, a.radius)
                         self.objects[id_a] = a.model_copy(update={"position": cand_a})
                     else:
                         ma = max(0.05, a.weight)
@@ -2137,6 +2156,8 @@ class World:
                             cand_a = self._clamp_out_of_ledge(a.position, cand_a)
                         if prevent_ledge_entry and id_b in prevent_ledge_entry and self.terrain.is_ledge(cand_b):
                             cand_b = self._clamp_out_of_ledge(b.position, cand_b)
+                        cand_a = self._clamp_to_grid_bounds(a.position, cand_a, a.radius)
+                        cand_b = self._clamp_to_grid_bounds(b.position, cand_b, b.radius)
                         self.objects[id_a] = a.model_copy(update={"position": cand_a})
                         self.objects[id_b] = b.model_copy(update={"position": cand_b})
             if not any_overlap:
@@ -2194,6 +2215,31 @@ class World:
         if not self.terrain.is_ledge(only_y):
             return only_y
         return safe_pos
+
+    def _clamp_to_grid_bounds(
+        self,
+        safe_pos: Position,
+        candidate_pos: Position,
+        radius: float = 0.0,
+    ) -> Position:
+        """Clamp ``candidate_pos`` inside the bounded terrain grid when ``safe_pos`` started inside it."""
+        cx = candidate_pos.x
+        cy = candidate_pos.y
+        if self.terrain.width is not None:
+            max_w = self.terrain.width * self.terrain.tile_size
+            if 0.0 <= safe_pos.x <= max_w:
+                min_x = min(safe_pos.x, max(0.0, radius))
+                max_x = max(safe_pos.x, max_w - max(0.0, radius))
+                cx = min(max_x, max(min_x, cx))
+        if self.terrain.height is not None:
+            max_h = self.terrain.height * self.terrain.tile_size
+            if 0.0 <= safe_pos.y <= max_h:
+                min_y = min(safe_pos.y, max(0.0, radius))
+                max_y = max(safe_pos.y, max_h - max(0.0, radius))
+                cy = min(max_y, max(min_y, cy))
+        if cx == candidate_pos.x and cy == candidate_pos.y:
+            return candidate_pos
+        return Position(x=cx, y=cy)
 
     def resolve_collisions(self) -> None:
         """Resolve all circle overlaps on ``ground`` and ``raised`` levels."""
@@ -2398,6 +2444,13 @@ class World:
                             cand_pos = old_pos
                             vx = -obj.velocity.x * COLLISION_RESTITUTION
                             vy = -obj.velocity.y * COLLISION_RESTITUTION
+
+                    bounded_pos = self._clamp_to_grid_bounds(old_pos, cand_pos, obj.radius)
+                    if bounded_pos.x != cand_pos.x:
+                        vx = -vx * COLLISION_RESTITUTION
+                    if bounded_pos.y != cand_pos.y:
+                        vy = -vy * COLLISION_RESTITUTION
+                    cand_pos = bounded_pos
 
                     self.objects[oid] = obj.model_copy(
                         update={
@@ -2667,3 +2720,42 @@ class World:
     def from_snapshot(cls, snapshot: str | bytes | Mapping[str, Any]) -> World:
         """Create a new ``World`` restored from ``snapshot``."""
         return cls._restore_from_cls(snapshot)
+
+    @classmethod
+    def from_file(
+        cls,
+        path: Any = None,
+        *,
+        rng: random.Random | int | None = None,
+        seed: int | None = None,
+        settings: Any = None,
+        config: Any = None,
+    ) -> World:
+        """Load a ``World`` from a TOML or JSON world definition file."""
+        from arden.world.loader import load_world
+
+        return load_world(
+            path,
+            rng=rng,
+            seed=seed,
+            settings=settings if settings is not None else config,
+        )
+
+    @classmethod
+    def from_toml(
+        cls,
+        path: Any = None,
+        *,
+        rng: random.Random | int | None = None,
+        seed: int | None = None,
+        settings: Any = None,
+        config: Any = None,
+    ) -> World:
+        """Alias for ``from_file``."""
+        return cls.from_file(
+            path,
+            rng=rng,
+            seed=seed,
+            settings=settings,
+            config=config,
+        )

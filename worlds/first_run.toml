@@ -1,0 +1,380 @@
+# First-run clearing world definition (docs/DESIGN.md Section 8).
+# Objects are defined purely from physical properties and hidden verb rules.
+# `creator_label` is metadata for the web client and observer log only and is
+# never exposed to agent perception.
+
+[body]
+position = { x = 6.5, y = 6.5 }
+level = "ground"
+energy = 1.0
+comfort = 1.0
+
+[terrain]
+width = 16
+height = 16
+tile_size = 1.0
+default_type = "grass"
+
+# Stream along the northern edge separating the meadow (y = 0..11) from the far bank (y = 13..15).
+[[terrain.regions]]
+x0 = 0
+y0 = 12
+x1 = 15
+y1 = 12
+type = "water"
+flow = { x = 1.0, y = 0.0 }
+
+# Raised rock ledge (elevation 1.0m) in the western clearing.
+[[terrain.regions]]
+x0 = 1
+y0 = 5
+x1 = 2
+y1 = 8
+type = "ledge"
+
+# --- Objects ---
+
+[[objects]]
+id = "object_1"
+creator_label = "large tree (east)"
+position = { x = 10.5, y = 6.5 }
+level = "ground"
+shape = "cylinder"
+height = 3.5
+volume = 0.8
+weight = 200.0
+rigidity = 0.98
+binding = false
+hollow = false
+fragile = false
+color = "brown"
+fixed = true
+
+[[objects]]
+id = "object_2"
+creator_label = "large tree (northwest)"
+position = { x = 4.5, y = 9.5 }
+level = "ground"
+shape = "cylinder"
+height = 3.2
+volume = 0.7
+weight = 180.0
+rigidity = 0.98
+binding = false
+hollow = false
+fragile = false
+color = "brown"
+fixed = true
+
+[[objects]]
+id = "object_3"
+creator_label = "berry (meadow)"
+position = { x = 7.2, y = 6.8 }
+level = "ground"
+shape = "sphere"
+height = 0.08
+volume = 0.0003
+weight = 0.02
+rigidity = 0.2
+binding = false
+hollow = false
+fragile = true
+color = "red"
+fixed = false
+behavior = [
+    { verb = "edible", energy = 0.15 },
+    { verb = "strike", response = "break", above_force = 0.2 },
+]
+
+[[objects]]
+id = "object_4"
+creator_label = "berry bush"
+position = { x = 7.6, y = 8.2 }
+level = "ground"
+shape = "sphere"
+height = 0.9
+volume = 0.35
+weight = 8.0
+rigidity = 0.4
+binding = false
+hollow = false
+fragile = true
+color = "green"
+fixed = true
+state = { berries = 3 }
+behavior = [
+    { verb = "edible", restore_energy = 0.15 },
+    { verb = "strike", response = "break", above_force = 0.85 },
+]
+
+[[objects]]
+id = "object_5"
+creator_label = "berry (by bush)"
+position = { x = 7.8, y = 7.5 }
+level = "ground"
+shape = "sphere"
+height = 0.08
+volume = 0.0003
+weight = 0.02
+rigidity = 0.2
+binding = false
+hollow = false
+fragile = true
+color = "red"
+fixed = false
+behavior = [
+    { verb = "edible", energy = 0.15 },
+    { verb = "strike", response = "break", above_force = 0.2 },
+]
+
+[[objects]]
+id = "object_6"
+creator_label = "hollow log"
+position = { x = 4.5, y = 4.5 }
+level = "ground"
+shape = "cylinder"
+height = 0.55
+volume = 0.18
+weight = 8.0
+rigidity = 0.9
+binding = false
+hollow = true
+fragile = false
+color = "brown"
+fixed = false
+
+[[objects]]
+id = "object_7"
+creator_label = "ball"
+position = { x = 8.2, y = 6.5 }
+level = "ground"
+shape = "sphere"
+height = 0.25
+volume = 0.008
+weight = 0.25
+rigidity = 0.5
+binding = false
+hollow = false
+fragile = false
+color = "red"
+fixed = false
+behavior = [
+    { verb = "push", scale = 4 },
+    { verb = "strike", response = "bounce" },
+]
+
+[[objects]]
+id = "object_8"
+creator_label = "stick (meadow)"
+position = { x = 5.5, y = 5.8 }
+level = "ground"
+shape = "long"
+height = 0.85
+volume = 0.006
+weight = 0.3
+rigidity = 0.88
+binding = false
+hollow = false
+fragile = false
+color = "brown"
+fixed = false
+
+[[objects]]
+id = "object_9"
+creator_label = "flat stone (near ledge south)"
+position = { x = 3.4, y = 6.0 }
+level = "ground"
+shape = "flat"
+height = 0.28
+volume = 0.045
+weight = 2.8
+rigidity = 0.95
+binding = false
+hollow = false
+fragile = false
+color = "gray"
+fixed = false
+
+[[objects]]
+id = "object_10"
+creator_label = "flat stone (near ledge north)"
+position = { x = 3.4, y = 7.0 }
+level = "ground"
+shape = "flat"
+height = 0.28
+volume = 0.045
+weight = 2.6
+rigidity = 0.95
+binding = false
+hollow = false
+fragile = false
+color = "gray"
+fixed = false
+
+[[objects]]
+id = "object_11"
+creator_label = "flat stone (near stream)"
+position = { x = 6.0, y = 9.8 }
+level = "ground"
+shape = "flat"
+height = 0.25
+volume = 0.04
+weight = 2.5
+rigidity = 0.95
+binding = false
+hollow = false
+fragile = false
+color = "gray"
+fixed = false
+
+[[objects]]
+id = "object_12"
+creator_label = "vine (meadow)"
+position = { x = 5.2, y = 7.4 }
+level = "ground"
+shape = "long"
+height = 1.2
+volume = 0.003
+weight = 0.15
+rigidity = 0.2
+binding = true
+hollow = false
+fragile = false
+color = "green"
+fixed = false
+
+[[objects]]
+id = "object_13"
+creator_label = "leaf (meadow)"
+position = { x = 6.2, y = 5.2 }
+level = "ground"
+shape = "flat"
+height = 0.02
+volume = 0.0004
+weight = 0.05
+rigidity = 0.15
+binding = false
+hollow = false
+fragile = false
+color = "green"
+fixed = false
+
+[[objects]]
+id = "object_14"
+creator_label = "leaf (stream)"
+position = { x = 5.5, y = 12.5 }
+level = "ground"
+shape = "flat"
+height = 0.02
+volume = 0.0004
+weight = 0.05
+rigidity = 0.15
+binding = false
+hollow = false
+fragile = false
+color = "green"
+fixed = false
+state = { wet = true }
+
+[[objects]]
+id = "object_15"
+creator_label = "mailbox placeholder"
+position = { x = 6.5, y = 1.2 }
+level = "ground"
+shape = "cube"
+height = 1.1
+volume = 0.12
+weight = 15.0
+rigidity = 0.95
+binding = false
+hollow = true
+fragile = false
+color = "blue"
+fixed = true
+behavior = [
+    { verb = "action_1" },
+]
+
+# --- Deliberate friction: objects on the raised rock ledge (out of reach from ground) ---
+
+[[objects]]
+id = "object_16"
+creator_label = "stick (on ledge)"
+position = { x = 1.5, y = 6.0 }
+level = "raised"
+shape = "long"
+height = 0.9
+volume = 0.007
+weight = 0.35
+rigidity = 0.9
+binding = false
+hollow = false
+fragile = false
+color = "brown"
+fixed = false
+
+[[objects]]
+id = "object_17"
+creator_label = "flat stone (on ledge)"
+position = { x = 1.5, y = 7.2 }
+level = "raised"
+shape = "flat"
+height = 0.25
+volume = 0.035
+weight = 2.2
+rigidity = 0.95
+binding = false
+hollow = false
+fragile = false
+color = "gray"
+fixed = false
+
+# --- Deliberate friction: loose materials on the far side of the stream ---
+
+[[objects]]
+id = "object_18"
+creator_label = "stick (far bank)"
+position = { x = 5.5, y = 14.2 }
+level = "ground"
+shape = "long"
+height = 0.85
+volume = 0.006
+weight = 0.3
+rigidity = 0.88
+binding = false
+hollow = false
+fragile = false
+color = "brown"
+fixed = false
+
+[[objects]]
+id = "object_19"
+creator_label = "vine (far bank)"
+position = { x = 7.5, y = 14.2 }
+level = "ground"
+shape = "long"
+height = 1.1
+volume = 0.003
+weight = 0.15
+rigidity = 0.2
+binding = true
+hollow = false
+fragile = false
+color = "green"
+fixed = false
+
+[[objects]]
+id = "object_20"
+creator_label = "flat stone (far bank)"
+position = { x = 9.5, y = 14.2 }
+level = "ground"
+shape = "flat"
+height = 0.26
+volume = 0.04
+weight = 2.4
+rigidity = 0.95
+binding = false
+hollow = false
+fragile = false
+color = "gray"
+fixed = false
