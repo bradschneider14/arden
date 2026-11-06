@@ -124,6 +124,20 @@ recall_boost = 0.15
 discomfort_salience_boost = 0.25
 # Salience boost weight for surprise.
 surprise_salience_boost = 0.35
+# Hard cap on semantic beliefs before evicting the lowest confidence * recency belief.
+max_beliefs = 32
+# Default initial confidence for newly proposed semantic beliefs.
+initial_belief_confidence = 0.5
+# Confidence boost when a reflection observation supports an existing belief.
+belief_support_delta = 0.15
+# Confidence drop when a reflection observation contradicts an existing belief.
+belief_contradict_delta = 0.2
+# Per-tick recency decay rate for belief eviction and memory retrieval scoring.
+recency_decay_rate = 0.01
+# Maximum word count for the agent's self-model rewritten during reflection.
+max_self_model_words = 80
+# Default number of top memories (episodes and beliefs) retrieved for prompts.
+retrieval_k = 5
 [gate]
 # Periodic heartbeat interval in simulation ticks (chosen to over-wake).
 heartbeat_interval = 30

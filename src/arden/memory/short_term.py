@@ -23,9 +23,22 @@ from arden.actions.verbs import ActionResult
 from arden.llm.base import LLMBackend, LLMOutputError
 from arden.llm.prompts import build_reflect_prompt, format_body_state
 from arden.llm.schemas import VERBS, Intent, Step
+from arden.memory.beliefs import (
+    DEFAULT_EMBEDDING_HOOK,
+    Belief,
+    BeliefEvictedEvent,
+    BeliefStore,
+    EmbeddingHook,
+    ReflectionBelief,
+    SelfModel,
+    SelfModelVersion,
+    _get_active_belief_store,
+    retrieve,
+)
 from arden.memory.store import (
     DEFAULT_BUFFER_SIZE,
     DEFAULT_REST_IDLE_TICKS,
+    DEFAULT_RETRIEVAL_K,
     SURPRISE_KIND_WEIGHTS,
     Episode,
     EpisodeStore,
@@ -312,6 +325,8 @@ class ShortTermBuffer:
         events: EventBus | None = None,
         llm: LLMBackend | None = None,
         store: EpisodeStore | None = None,
+        belief_store: BeliefStore | None = None,
+        self_model: SelfModel | str | None = None,
         auto_reflect: bool | None = None,
     ) -> None:
         if isinstance(capacity, MemoryConfig) or (
@@ -361,6 +376,21 @@ class ShortTermBuffer:
         self.events: EventBus = events if events is not None else EventBus()
         self.llm: LLMBackend | None = llm
         self.store: EpisodeStore | None = store
+        self.belief_store: BeliefStore | None = (
+            belief_store
+            if belief_store is not None
+            else (store.belief_store if store is not None else None)
+        )
+        if isinstance(self_model, SelfModel):
+            self.self_model_store: SelfModel | None = self_model
+        elif isinstance(self_model, str):
+            self.self_model_store = SelfModel(
+                self_model, max_words=self.config.max_self_model_words
+            )
+        elif store is not None:
+            self.self_model_store = store.self_model_store
+        else:
+            self.self_model_store = None
         self.auto_reflect: bool = (llm is not None) if auto_reflect is None else bool(auto_reflect)
 
         self._entries: deque[BufferEntry] = deque(maxlen=self.capacity)
@@ -368,6 +398,8 @@ class ShortTermBuffer:
         self.buffer_full_events: list[BufferFullEvent] = []
         self.reflection_events: list[ReflectionEvent] = []
         self.last_reflected_episodes: list[Episode] = []
+        self.last_reflected_beliefs: list[Belief] = []
+        self.last_reflected_self_model: str | None = None
         self._buffer_full_callbacks: list[Callable[[BufferFullEvent], None]] = []
 
         if self.world is not None:
@@ -426,6 +458,33 @@ class ShortTermBuffer:
         if self.store is not None:
             return self.store.all()
         return list(self.last_reflected_episodes)
+
+    @property
+    def beliefs(self) -> list[Belief]:
+        """Beliefs currently stored in ``belief_store`` or produced by the most recent reflection."""
+        if self.belief_store is not None:
+            return self.belief_store.all()
+        if self.store is not None:
+            return self.store.beliefs
+        return list(self.last_reflected_beliefs)
+
+    @property
+    def self_model(self) -> str:
+        """Current self-model text."""
+        if self.self_model_store is not None:
+            return self.self_model_store.text
+        if self.store is not None:
+            return self.store.self_model
+        return self.last_reflected_self_model or ""
+
+    @property
+    def self_model_history(self) -> list[SelfModelVersion]:
+        """All stored versions of the self-model."""
+        if self.self_model_store is not None:
+            return self.self_model_store.all()
+        if self.store is not None:
+            return self.store.self_model_history
+        return []
 
     def subscribe(
         self,
@@ -740,8 +799,9 @@ class ShortTermBuffer:
         llm: LLMBackend | None = None,
         *,
         store: EpisodeStore | None = None,
+        belief_store: BeliefStore | None = None,
         world: World | None = None,
-        self_model: str | None = None,
+        self_model: SelfModel | str | None = None,
         body_state: Any = None,
         comfort: float | None = None,
         surprise: float | bool | None = None,
@@ -750,24 +810,31 @@ class ShortTermBuffer:
         timeout_s: float = 30.0,
         clear_buffer: bool = True,
         trigger: str | None = None,
-    ) -> list[Episode]:
+    ) -> ReflectedMemories:
         """Run reflection on this buffer using the LLM ``reflect`` role."""
         resolved_llm = llm if llm is not None else self.llm
         if resolved_llm is None:
             raise ValueError("An LLMBackend is required to run reflection")
         resolved_store = store if store is not None else self.store
+        resolved_belief_store = belief_store if belief_store is not None else self.belief_store
+        resolved_self_model = self_model if self_model is not None else self.self_model_store
         resolved_world = world if world is not None else self.world
 
-        # If buffer was already auto-reflected and is currently empty, return the last reflected episodes
-        if len(self._entries) == 0 and self.last_reflected_episodes:
-            return list(self.last_reflected_episodes)
+        # If buffer was already auto-reflected and is currently empty, return the last reflected result
+        if len(self._entries) == 0 and (self.last_reflected_episodes or self.last_reflected_beliefs):
+            return ReflectedMemories(
+                self.last_reflected_episodes,
+                beliefs=self.last_reflected_beliefs,
+                self_model=self.last_reflected_self_model,
+            )
 
         return reflect(
             self,
             resolved_llm,
             store=resolved_store,
+            belief_store=resolved_belief_store,
             world=resolved_world,
-            self_model=self_model,
+            self_model=resolved_self_model,
             body_state=body_state,
             comfort=comfort,
             surprise=surprise,
@@ -886,13 +953,32 @@ def _summarize_buffer_context(
     return latest_tick, eff_comfort, eff_surprise, dom_kind, made_by, tags
 
 
+class ReflectedMemories(list[Episode]):
+    """List of reflected ``Episode`` objects that also carries updated ``beliefs`` and ``self_model``."""
+
+    def __init__(
+        self,
+        episodes: Sequence[Episode] = (),
+        *,
+        beliefs: Sequence[Belief] = (),
+        self_model: str | None = None,
+        self_model_version: SelfModelVersion | None = None,
+    ) -> None:
+        super().__init__(episodes)
+        self.episodes: list[Episode] = list(episodes)
+        self.beliefs: list[Belief] = list(beliefs)
+        self.self_model: str | None = self_model
+        self.self_model_version: SelfModelVersion | None = self_model_version
+
+
 def reflect(
-    buffer: ShortTermBuffer | Sequence[BufferEntry | Mapping[str, Any] | str],
+    buffer: ShortTermBuffer | Sequence[BufferEntry | Mapping[str, Any] | str] | None = None,
     llm: LLMBackend | None = None,
     *,
     store: EpisodeStore | None = None,
+    belief_store: BeliefStore | None = None,
     world: World | None = None,
-    self_model: str | None = None,
+    self_model: SelfModel | str | None = None,
     body_state: Any = None,
     comfort: float | None = None,
     surprise: float | bool | None = None,
@@ -902,18 +988,37 @@ def reflect(
     timeout_s: float = 30.0,
     clear_buffer: bool = True,
     trigger: str | None = None,
-) -> list[Episode]:
-    """Compress the short-term buffer into salient ``Episode`` objects via the LLM ``reflect`` role.
+) -> ReflectedMemories:
+    """Compress the short-term buffer into salient ``Episode`` objects, update ``BeliefStore``,
+    and rewrite ``SelfModel`` via the LLM ``reflect`` role.
 
     - Calls ``llm.complete_json("reflect", system, user, ReflectionOutput.model_json_schema(), timeout_s)``.
     - Adjusts episode salience for comfort (discomfort raises salience) and surprise.
+    - Applies belief proposals, supports, and contradictions to ``belief_store``.
+    - Rewrites ``self_model`` (max ~80 words) and stores the new version.
     - Persists episodes to ``store`` when provided and clears ``buffer`` when ``clear_buffer=True``.
     """
+    if isinstance(buffer, LLMBackend) and llm is None:
+        llm = buffer
+        buffer = ()
+    if buffer is None:
+        buffer = ()
+
     if isinstance(buffer, ShortTermBuffer):
         st_buffer: ShortTermBuffer | None = buffer
         entries = buffer.entries
         resolved_llm = llm if llm is not None else buffer.llm
         resolved_store = store if store is not None else buffer.store
+        resolved_belief_store = (
+            belief_store
+            if belief_store is not None
+            else (buffer.belief_store if buffer.belief_store is not None else (resolved_store.belief_store if resolved_store is not None else None))
+        )
+        resolved_self_model_obj: SelfModel | None = (
+            self_model
+            if isinstance(self_model, SelfModel)
+            else (buffer.self_model_store if buffer.self_model_store is not None else (resolved_store.self_model_store if resolved_store is not None else None))
+        )
         resolved_world = world if world is not None else buffer.world
         cfg = resolve_memory_config(config if config is not None else buffer.config)
         eff_trigger = trigger or ("buffer_full" if buffer.is_full else "rest")
@@ -925,6 +1030,16 @@ def reflect(
         entries = list(temp_buf._entries)
         resolved_llm = llm
         resolved_store = store
+        resolved_belief_store = (
+            belief_store
+            if belief_store is not None
+            else (resolved_store.belief_store if resolved_store is not None else _get_active_belief_store())
+        )
+        resolved_self_model_obj = (
+            self_model
+            if isinstance(self_model, SelfModel)
+            else (resolved_store.self_model_store if resolved_store is not None else None)
+        )
         resolved_world = world
         cfg = resolve_memory_config(config)
         eff_trigger = trigger or "manual"
@@ -962,10 +1077,21 @@ def reflect(
                 "holding": None,
             }
 
+    if isinstance(self_model, str):
+        current_self_model_str: str | None = self_model
+    elif resolved_self_model_obj is not None and resolved_self_model_obj.text:
+        current_self_model_str = resolved_self_model_obj.text
+    else:
+        current_self_model_str = None
+
     prompt_memories = [e.to_text() for e in entries]
+    if resolved_belief_store is not None:
+        for b in resolved_belief_store.all():
+            prompt_memories.append(b.to_text())
+
     prompt = build_reflect_prompt(
-        percept=st_buffer.to_text() if st_buffer is not None else "\n".join(prompt_memories),
-        self_model=self_model,
+        percept=st_buffer.to_text() if st_buffer is not None else ("\n".join(e.to_text() for e in entries) or "none"),
+        self_model=current_self_model_str,
         memories=prompt_memories,
         body_state=format_body_state(resolved_body_state),
     )
@@ -1034,11 +1160,46 @@ def reflect(
             )
         )
 
-    if resolved_store is not None:
+    if resolved_store is not None and episodes:
         episodes = resolved_store.save_episodes(episodes, tick=resolved_tick)
+
+    # Apply belief updates (propose, support, contradict)
+    updated_beliefs: list[Belief] = []
+    if parsed_output.beliefs:
+        if resolved_belief_store is not None:
+            if resolved_world is not None and resolved_belief_store.world is None:
+                resolved_belief_store.world = resolved_world
+            updated_beliefs = resolved_belief_store.apply_reflection_beliefs(
+                parsed_output.beliefs,
+                tick=resolved_tick,
+            )
+        else:
+            temp_bstore = BeliefStore(db_path=":memory:", config=cfg, world=resolved_world)
+            updated_beliefs = temp_bstore.apply_reflection_beliefs(
+                parsed_output.beliefs,
+                tick=resolved_tick,
+            )
+
+    # Apply self-model rewrite (max ~80 words, storing every version)
+    updated_self_model_ver: SelfModelVersion | None = None
+    updated_self_model_text: str | None = None
+    if parsed_output.self_model is not None and parsed_output.self_model.strip():
+        if resolved_self_model_obj is None:
+            resolved_self_model_obj = SelfModel(max_words=cfg.max_self_model_words)
+            if st_buffer is not None:
+                st_buffer.self_model_store = resolved_self_model_obj
+        updated_self_model_ver = resolved_self_model_obj.update(
+            parsed_output.self_model,
+            tick=resolved_tick,
+        )
+        updated_self_model_text = updated_self_model_ver.text
+    elif resolved_self_model_obj is not None and resolved_self_model_obj.text:
+        updated_self_model_text = resolved_self_model_obj.text
 
     if st_buffer is not None:
         st_buffer.last_reflected_episodes = list(episodes)
+        st_buffer.last_reflected_beliefs = list(updated_beliefs)
+        st_buffer.last_reflected_self_model = updated_self_model_text
         if clear_buffer:
             st_buffer.clear()
         ref_event = ReflectionEvent(
@@ -1046,6 +1207,8 @@ def reflect(
             source="memory",
             trigger=eff_trigger,
             episodes=list(episodes),
+            beliefs=list(updated_beliefs),
+            self_model=updated_self_model_text,
         )
         st_buffer.reflection_events.append(ref_event)
         st_buffer.events.emit(ref_event)
@@ -1057,10 +1220,17 @@ def reflect(
             source="memory",
             trigger=eff_trigger,
             episodes=list(episodes),
+            beliefs=list(updated_beliefs),
+            self_model=updated_self_model_text,
         )
         resolved_world.events.emit(ref_event)
 
-    return episodes
+    return ReflectedMemories(
+        episodes,
+        beliefs=updated_beliefs,
+        self_model=updated_self_model_text,
+        self_model_version=updated_self_model_ver,
+    )
 
 
 def maybe_reflect(
@@ -1070,32 +1240,40 @@ def maybe_reflect(
     store: EpisodeStore | None = None,
     idle_ticks: int | None = None,
     **kwargs: Any,
-) -> list[Episode]:
+) -> ReflectedMemories:
     """Run ``reflect`` if ``buffer`` is full or has been idle for ``M`` ticks."""
-    return buffer.maybe_reflect(llm=llm, store=store, idle_ticks=idle_ticks, **kwargs)
+    res = buffer.maybe_reflect(llm=llm, store=store, idle_ticks=idle_ticks, **kwargs)
+    if isinstance(res, ReflectedMemories):
+        return res
+    return ReflectedMemories(res)
 
 
 class MemoryManager:
-    """Coordinates ``ShortTermBuffer``, ``EpisodeStore``, and LLM reflection."""
+    """Coordinates ``ShortTermBuffer``, ``EpisodeStore``, ``BeliefStore``, ``SelfModel``, and retrieval."""
 
     def __init__(
         self,
-        llm: LLMBackend,
+        llm: LLMBackend | None = None,
         *,
         buffer: ShortTermBuffer | None = None,
         store: EpisodeStore | None = None,
+        belief_store: BeliefStore | None = None,
+        self_model: SelfModel | str | None = None,
         world: World | None = None,
         config: MemoryConfig | Settings | Mapping[str, Any] | None = None,
         settings: Settings | None = None,
         db_path: Any = None,
         buffer_size: int | None = None,
         rest_idle_ticks: int | None = None,
+        max_beliefs: int | None = None,
     ) -> None:
         cfg = resolve_memory_config(config, settings=settings)
         if buffer_size is not None:
             cfg = cfg.model_copy(update={"buffer_size": int(buffer_size)})
         if rest_idle_ticks is not None:
             cfg = cfg.model_copy(update={"rest_idle_ticks": int(rest_idle_ticks)})
+        if max_beliefs is not None:
+            cfg = cfg.model_copy(update={"max_beliefs": int(max_beliefs)})
         if db_path is not None:
             cfg = cfg.model_copy(update={"db_path": db_path})
 
@@ -1103,6 +1281,21 @@ class MemoryManager:
         self.llm = llm
         self.world = world
         self.store = store if store is not None else EpisodeStore(config=cfg)
+        self.belief_store: BeliefStore = (
+            belief_store if belief_store is not None else self.store.belief_store
+        )
+        if self.world is not None and self.belief_store.world is None:
+            self.belief_store.world = self.world
+
+        if isinstance(self_model, SelfModel):
+            self.self_model_store: SelfModel = self_model
+        elif isinstance(self_model, str):
+            self.self_model_store = self.store.self_model_store
+            if self_model.strip() and self_model.strip().lower() != "none":
+                self.self_model_store.update(self_model, tick=world.tick if world is not None else 0)
+        else:
+            self.self_model_store = self.store.self_model_store
+
         self.buffer = (
             buffer
             if buffer is not None
@@ -1111,19 +1304,41 @@ class MemoryManager:
                 world=world,
                 llm=llm,
                 store=self.store,
-                auto_reflect=True,
+                belief_store=self.belief_store,
+                self_model=self.self_model_store,
+                auto_reflect=(llm is not None),
             )
         )
-        if self.buffer.llm is None:
+        if self.buffer.llm is None and llm is not None:
             self.buffer.llm = llm
         if self.buffer.store is None:
             self.buffer.store = self.store
-        self.buffer.auto_reflect = True
+        if self.buffer.belief_store is None:
+            self.buffer.belief_store = self.belief_store
+        if self.buffer.self_model_store is None:
+            self.buffer.self_model_store = self.self_model_store
+        if llm is not None:
+            self.buffer.auto_reflect = True
 
     @property
     def short_term(self) -> ShortTermBuffer:
         """Alias for ``buffer``."""
         return self.buffer
+
+    @property
+    def beliefs(self) -> list[Belief]:
+        """All beliefs currently stored in ``belief_store``."""
+        return self.belief_store.all()
+
+    @property
+    def self_model(self) -> str:
+        """Current self-model text."""
+        return self.self_model_store.text
+
+    @property
+    def self_model_history(self) -> list[SelfModelVersion]:
+        """All stored versions of the self-model."""
+        return self.self_model_store.all()
 
     def record(self, *args: Any, **kwargs: Any) -> BufferEntry:
         """Add an entry to the short-term buffer (auto-reflecting if full)."""
@@ -1139,9 +1354,15 @@ class MemoryManager:
     rest = record_idle
     step_idle = record_idle
 
-    def reflect(self, **kwargs: Any) -> list[Episode]:
-        """Force reflection on the current buffer and save episodes to ``store``."""
-        return self.buffer.reflect(self.llm, store=self.store, **kwargs)
+    def reflect(self, **kwargs: Any) -> ReflectedMemories:
+        """Force reflection on the current buffer and save episodes, beliefs, and self-model."""
+        return self.buffer.reflect(
+            self.llm,
+            store=self.store,
+            belief_store=self.belief_store,
+            self_model=self.self_model_store,
+            **kwargs,
+        )
 
     def decay(self, *args: Any, **kwargs: Any) -> list[Episode]:
         """Decay episode saliences in ``store`` and delete forgotten episodes."""
@@ -1150,6 +1371,30 @@ class MemoryManager:
     def recall(self, *args: Any, **kwargs: Any) -> Episode | list[Episode] | None:
         """Recall an episode or episodes in ``store``."""
         return self.store.recall(*args, **kwargs)
+
+    def retrieve(
+        self,
+        context_tags: Sequence[str] | str | Any,
+        k: int = DEFAULT_RETRIEVAL_K,
+        *,
+        current_tick: int | None = None,
+        embedding_fn: EmbeddingHook | None = DEFAULT_EMBEDDING_HOOK,
+    ) -> list[Episode | Belief]:
+        """Retrieve top-``k`` episodes and beliefs scored by recency, importance, and relevance."""
+        eff_tick = (
+            current_tick
+            if current_tick is not None
+            else (self.world.tick if self.world is not None else None)
+        )
+        return retrieve(
+            context_tags,
+            k,
+            episode_store=self.store,
+            belief_store=self.belief_store,
+            current_tick=eff_tick,
+            recency_decay_rate=self.config.recency_decay_rate,
+            embedding_fn=embedding_fn,
+        )
 
 
 MemorySystem = MemoryManager
@@ -1162,6 +1407,7 @@ __all__ = [
     "BufferFullEvent",
     "MemoryManager",
     "MemorySystem",
+    "ReflectedMemories",
     "ReflectionEvent",
     "ShortTermBuffer",
     "ShortTermEntry",

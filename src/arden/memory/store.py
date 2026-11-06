@@ -20,20 +20,57 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from arden.config import (
+    DEFAULT_BELIEF_CONTRADICT_DELTA,
+    DEFAULT_BELIEF_SUPPORT_DELTA,
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DB_PATH,
     DEFAULT_DECAY_RATE,
     DEFAULT_DISCOMFORT_SALIENCE_BOOST,
+    DEFAULT_INITIAL_BELIEF_CONFIDENCE,
+    DEFAULT_MAX_BELIEFS,
+    DEFAULT_MAX_SELF_MODEL_WORDS,
     DEFAULT_RECALL_BOOST,
+    DEFAULT_RECENCY_DECAY_RATE,
     DEFAULT_REST_IDLE_TICKS,
+    DEFAULT_RETRIEVAL_K,
     DEFAULT_SALIENCE_FLOOR,
     DEFAULT_SURPRISE_SALIENCE_BOOST,
     MemoryConfig,
     MemorySettings,
     Settings,
+)
+from arden.memory.beliefs import (
+    DEFAULT_EMBEDDING_HOOK,
+    Belief,
+    BeliefAction,
+    BeliefEvictedEvent,
+    BeliefHistoryEntry,
+    BeliefProposal,
+    BeliefStore,
+    BeliefUpdate,
+    ConfidenceChange,
+    ConfidenceHistoryEntry,
+    ConfidenceOutcome,
+    EmbeddingHook,
+    MemoryRetriever,
+    ReflectionBelief,
+    SelfModel,
+    SelfModelEntry,
+    SelfModelStore,
+    SelfModelVersion,
+    SemanticBeliefStore,
+    _set_active_episode_store,
+    compute_recency,
+    compute_tag_relevance,
+    cosine_similarity,
+    extract_context_tags,
+    normalize_belief_action,
+    retrieve,
+    score_memory_item,
+    truncate_self_model,
 )
 
 SURPRISE_KINDS: tuple[str, ...] = ("physical", "expectation", "belief", "novelty")
@@ -161,7 +198,20 @@ class ReflectionOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    episodes: list[ReflectionEpisode]
+    episodes: list[ReflectionEpisode] = Field(default_factory=list)
+    beliefs: list[ReflectionBelief] = Field(default_factory=list)
+    self_model: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_aliases(cls, values: Any) -> Any:
+        if not isinstance(values, Mapping):
+            return values
+        raw = dict(values)
+        for belief_alias in ("belief_updates", "new_beliefs", "updated_beliefs"):
+            if belief_alias in raw and "beliefs" not in raw:
+                raw["beliefs"] = raw.pop(belief_alias)
+        return raw
 
 
 ReflectionResult = ReflectionOutput
@@ -183,6 +233,11 @@ class Episode(BaseModel):
     surprise_kind: SurpriseKind | None = None
     made_by_agent: list[str] = Field(default_factory=list)
     recall_count: int = Field(default=0, ge=0)
+
+    _score: float | None = PrivateAttr(default=None)
+    _recency: float | None = PrivateAttr(default=None)
+    _importance: float | None = PrivateAttr(default=None)
+    _relevance: float | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -270,6 +325,46 @@ class Episode(BaseModel):
     def recalled_tick(self) -> int:
         """Alias for ``last_recalled_tick``."""
         return self.last_recalled_tick
+
+    @property
+    def updated_tick(self) -> int:
+        """Most recent world tick for this episode (``max(tick, last_recalled_tick)``)."""
+        return max(self.tick, self.last_recalled_tick)
+
+    @property
+    def confidence(self) -> float:
+        """Alias for ``salience`` (importance score in retrieval)."""
+        return self.salience
+
+    @property
+    def importance(self) -> float:
+        """Importance score for retrieval (``salience``)."""
+        return self._importance if self._importance is not None else self.salience
+
+    @property
+    def recency(self) -> float:
+        """Recency score from the most recent retrieval or ``1.0``."""
+        return self._recency if self._recency is not None else 1.0
+
+    @property
+    def relevance(self) -> float:
+        """Relevance score from the most recent retrieval."""
+        return self._relevance if self._relevance is not None else 0.0
+
+    @property
+    def score(self) -> float:
+        """Combined score from the most recent retrieval (or ``salience``)."""
+        return self._score if self._score is not None else self.salience
+
+    @property
+    def item(self) -> Episode:
+        """Self-reference so retrieval callers expecting ``res.item`` work seamlessly."""
+        return self
+
+    @property
+    def kind(self) -> Literal["episode"]:
+        """Memory tier kind identifier."""
+        return "episode"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize episode to a JSON-compatible dictionary."""
@@ -435,6 +530,59 @@ class EpisodeStore:
 
         self._current_tick: int = self._query_max_tick()
         self.last_deleted_episodes: list[Episode] = []
+        self._belief_store: BeliefStore = BeliefStore(
+            connection=self.connection,
+            config=self.config,
+        )
+        self.self_model_store: SelfModel = SelfModel(
+            connection=self.connection,
+            max_words=self.config.max_self_model_words,
+        )
+        _set_active_episode_store(self)
+
+    @property
+    def belief_store(self) -> BeliefStore:
+        """Return the ``BeliefStore`` sharing this SQLite database."""
+        if self._belief_store._conn is None:
+            self._belief_store._conn = self.connection
+        return self._belief_store
+
+    @property
+    def beliefs(self) -> list[Belief]:
+        """All semantic beliefs currently stored in this database."""
+        return self.belief_store.all()
+
+    @property
+    def self_model(self) -> str:
+        """Current self-model text stored in this database."""
+        if self.self_model_store._conn is None:
+            self.self_model_store._conn = self.connection
+        return self.self_model_store.text
+
+    @property
+    def self_model_history(self) -> list[SelfModelVersion]:
+        """All versions of the self-model stored in this database."""
+        if self.self_model_store._conn is None:
+            self.self_model_store._conn = self.connection
+        return self.self_model_store.all()
+
+    def retrieve(
+        self,
+        context_tags: Sequence[str] | str | Any,
+        k: int = DEFAULT_RETRIEVAL_K,
+        *,
+        current_tick: int | None = None,
+        embedding_fn: EmbeddingHook | None = DEFAULT_EMBEDDING_HOOK,
+    ) -> list[Episode | Belief]:
+        """Retrieve top-``k`` episodes and beliefs from this store scored by recency, importance, and relevance."""
+        return retrieve(
+            context_tags,
+            k,
+            store=self,
+            current_tick=current_tick if current_tick is not None else self._current_tick,
+            recency_decay_rate=self.config.recency_decay_rate,
+            embedding_fn=embedding_fn,
+        )
 
     @property
     def path(self) -> Path:
@@ -616,6 +764,7 @@ class EpisodeStore:
             validated.tick,
             validated.last_recalled_tick,
         )
+        _set_active_episode_store(self)
         return validated.model_copy(update={"id": row_id, "salience": final_salience})
 
     save = add
@@ -975,12 +1124,18 @@ class EpisodeStore:
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
+        from arden.memory.beliefs import _active_episode_store
+
+        if _active_episode_store is self:
+            _set_active_episode_store(None)
         if self._conn is not None:
             try:
                 self._conn.close()
             except sqlite3.Error:
                 pass
             self._conn = None
+            self._belief_store._conn = None
+            self.self_model_store._conn = None
 
     def __enter__(self) -> EpisodeStore:
         return self
