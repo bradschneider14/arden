@@ -806,6 +806,7 @@ class ShortTermBuffer:
         comfort: float | None = None,
         surprise: float | bool | None = None,
         surprise_kind: SurpriseKind | str | None = None,
+        surprise_scorer: Any = None,
         tick: int | None = None,
         timeout_s: float = 30.0,
         clear_buffer: bool = True,
@@ -819,9 +820,17 @@ class ShortTermBuffer:
         resolved_belief_store = belief_store if belief_store is not None else self.belief_store
         resolved_self_model = self_model if self_model is not None else self.self_model_store
         resolved_world = world if world is not None else self.world
+        resolved_scorer = surprise_scorer if surprise_scorer is not None else getattr(self, "surprise_scorer", None)
 
         # If buffer was already auto-reflected and is currently empty, return the last reflected result
         if len(self._entries) == 0 and (self.last_reflected_episodes or self.last_reflected_beliefs):
+            if resolved_scorer is not None and hasattr(resolved_scorer, "resolve_with_beliefs"):
+                active_b = (
+                    resolved_belief_store.all()
+                    if resolved_belief_store is not None
+                    else self.last_reflected_beliefs
+                )
+                resolved_scorer.resolve_with_beliefs(active_b, world=resolved_world)
             return ReflectedMemories(
                 self.last_reflected_episodes,
                 beliefs=self.last_reflected_beliefs,
@@ -839,6 +848,7 @@ class ShortTermBuffer:
             comfort=comfort,
             surprise=surprise,
             surprise_kind=surprise_kind,
+            surprise_scorer=resolved_scorer,
             tick=tick,
             config=self.config,
             timeout_s=timeout_s,
@@ -983,6 +993,7 @@ def reflect(
     comfort: float | None = None,
     surprise: float | bool | None = None,
     surprise_kind: SurpriseKind | str | None = None,
+    surprise_scorer: Any = None,
     tick: int | None = None,
     config: MemoryConfig | Settings | Mapping[str, Any] | None = None,
     timeout_s: float = 30.0,
@@ -1224,6 +1235,16 @@ def reflect(
             self_model=updated_self_model_text,
         )
         resolved_world.events.emit(ref_event)
+
+    # Resolve unexplained surprise pulls after reflection (T16)
+    active_beliefs_after = (
+        resolved_belief_store.all()
+        if resolved_belief_store is not None
+        else list(updated_beliefs)
+    )
+    eff_scorer = surprise_scorer if surprise_scorer is not None else getattr(st_buffer, "surprise_scorer", None)
+    if eff_scorer is not None and hasattr(eff_scorer, "resolve_with_beliefs"):
+        eff_scorer.resolve_with_beliefs(active_beliefs_after, world=resolved_world)
 
     return ReflectedMemories(
         episodes,

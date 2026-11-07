@@ -152,6 +152,22 @@ boredom_threshold = 0.5
 # Minimum movement delta in meters for `<id> moves` / `<id> stops moving` conditions.
 move_threshold = 0.05
 
+[surprise]
+# Whether expectation surprise falls back to an LLM judge call when the cheap movement check is inconclusive.
+use_llm_judge = false
+# Initial per-context running average of prediction error (`usual_error(context)`).
+initial_usual_error = 0.1
+# Floor on `usual_error(context)` to prevent division by zero.
+min_usual_error = 0.1
+# Exponential moving average update rate for `usual_error(context)`.
+error_ema_alpha = 0.25
+# Decay factor in (0.0, 1.0] applied on each repeated identical surprise (`habituation_decay ** count`).
+habituation_decay = 0.65
+# Persistent pull value stored on an object id when a surprise remains unexplained after reflection.
+unexplained_pull = 0.2
+# Position/displacement tolerance in meters for the cheap expectation movement check.
+movement_tolerance = 0.25
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"
