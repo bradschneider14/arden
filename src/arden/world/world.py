@@ -845,6 +845,25 @@ class World:
         """Alias for ``events``."""
         return self.events
 
+    def get_pull(self, object_id: str) -> float:
+        """Return the persistent unexplained-surprise pull stored on ``object_id``."""
+        obj = self.objects.get(object_id)
+        if obj is not None:
+            return obj.pull
+        return 0.0
+
+    def set_pull(self, object_id: str, value: float) -> float:
+        """Set or clear the persistent unexplained-surprise pull stored on ``object_id``."""
+        obj = self.objects.get(object_id)
+        if obj is not None:
+            return obj.set_pull(value)
+        return max(0.0, float(value))
+
+    @property
+    def object_pulls(self) -> dict[str, float]:
+        """Mapping of ``object_id -> pull`` for all objects with a positive unexplained pull."""
+        return {oid: obj.pull for oid, obj in self.objects.items() if obj.pull > 0.0}
+
     @property
     def creator_labels(self) -> dict[str, str]:
         """Mapping of ``object_id -> creator_label`` for the web client and observer log.

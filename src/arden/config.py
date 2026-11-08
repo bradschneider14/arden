@@ -12,6 +12,7 @@ from arden.agent.gate import GateConfig, GateSettings
 from arden.environment.body import BodyConfig, BodySettings
 from arden.environment.daynight import DayNightConfig, DayNightSettings
 from arden.environment.weather import WeatherConfig, WeatherSettings
+from arden.surprise.scorer import SurpriseConfig, SurpriseSettings
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 DEFAULT_CONFIG_PATH = Path("arden.toml")
@@ -225,6 +226,7 @@ class Settings(BaseModel):
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     gate: GateSettings = Field(default_factory=GateSettings)
+    surprise: SurpriseSettings = Field(default_factory=SurpriseSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
@@ -275,6 +277,8 @@ __all__ = [
     "MemorySettings",
     "PerceptionSettings",
     "Settings",
+    "SurpriseConfig",
+    "SurpriseSettings",
     "WeatherConfig",
     "WeatherSettings",
     "WorldSettings",

@@ -53,10 +53,17 @@ NAME_SYSTEM_PROMPT = (
     "Reply with a single JSON object matching the requested schema."
 )
 
+JUDGE_SYSTEM_PROMPT = (
+    "You are an embodied agent comparing the expected outcome of an intent with the "
+    "observed outcome. Rate the discrepancy error from 0.0 (matched) to 1.0 (completely "
+    "contradicted) and reply with a single JSON object matching the requested schema."
+)
+
 _SYSTEM_PROMPTS: dict[str, str] = {
     "decide": DECIDE_SYSTEM_PROMPT,
     "reflect": REFLECT_SYSTEM_PROMPT,
     "name": NAME_SYSTEM_PROMPT,
+    "judge": JUDGE_SYSTEM_PROMPT,
 }
 
 
@@ -460,5 +467,22 @@ def build_name_prompt(
         body_state=body_state,
         previous_intent_result=previous_intent_result,
         target=target,
+        max_tokens=max_tokens,
+    )
+
+
+def build_judge_prompt(
+    expect: str,
+    outcome: Percept | PerceivedObject | ActionResult | Mapping[str, Any] | str | None = None,
+    *,
+    goal: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> BuiltPrompt:
+    """Build the ``judge`` prompt comparing an intent's ``expect`` with the observed ``outcome``."""
+    return build_prompt(
+        "judge",
+        percept=outcome if isinstance(outcome, str) else None,
+        previous_intent_result=None if isinstance(outcome, str) else outcome,
+        memories=[f"expect: {expect}"] + ([f"goal: {goal}"] if goal else []),
         max_tokens=max_tokens,
     )

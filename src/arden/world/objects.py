@@ -335,6 +335,58 @@ class WorldObject(BaseModel):
         """True if this object was built/assembled by the agent."""
         return bool(self.state.get("made_by_agent", False))
 
+    @property
+    def x(self) -> float:
+        """2D x-coordinate shortcut for ``self.position.x``."""
+        return self.position.x
+
+    @property
+    def y(self) -> float:
+        """2D y-coordinate shortcut for ``self.position.y``."""
+        return self.position.y
+
+    @property
+    def vx(self) -> float:
+        """2D x-velocity shortcut for ``self.velocity.x``."""
+        return self.velocity.x
+
+    @property
+    def vy(self) -> float:
+        """2D y-velocity shortcut for ``self.velocity.y``."""
+        return self.velocity.y
+
+    @property
+    def pull(self) -> float:
+        """Persistent curiosity pull from an unexplained surprise on this object."""
+        raw = self.state.get("unexplained_pull", self.state.get("pull", 0.0))
+        if isinstance(raw, int | float) and not isinstance(raw, bool):
+            return max(0.0, float(raw))
+        return 0.0
+
+    @pull.setter
+    def pull(self, value: float) -> None:
+        self.set_pull(value)
+
+    @property
+    def unexplained_pull(self) -> float:
+        """Alias for ``pull``."""
+        return self.pull
+
+    @unexplained_pull.setter
+    def unexplained_pull(self, value: float) -> None:
+        self.set_pull(value)
+
+    def set_pull(self, value: float) -> float:
+        """Set or clear the persistent unexplained-surprise pull stored on this object."""
+        val = max(0.0, float(value))
+        if val > 0.0:
+            self.state["unexplained_pull"] = val
+            self.state["pull"] = val
+        else:
+            self.state.pop("unexplained_pull", None)
+            self.state.pop("pull", None)
+        return val
+
     @field_validator("level")
     @classmethod
     def level_is_known(cls, value: str) -> str:
