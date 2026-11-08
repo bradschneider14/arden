@@ -81,6 +81,10 @@ def load_world(
     seed: int | None = None,
     settings: Any = None,
     config: Any = None,
+    mailbox: Any = None,
+    inbox: Any = None,
+    db_path: Any = None,
+    creator_note: str | None = None,
 ) -> World:
     """Load and return a ``World`` from a file path, mapping, or existing ``World``."""
     if isinstance(path, World):
@@ -104,6 +108,7 @@ def load_world(
     weather_data = data.get("weather")
     body_config_data = data.get("body_config")
     drives_data = data.get("drives")
+    mailbox_data = mailbox if mailbox is not None else data.get("mailbox")
     raw_objects = data.get("objects", ())
 
     objects_list: list[WorldObject] = []
@@ -136,6 +141,10 @@ def load_world(
         config=effective_config,
         body_config=body_config_data,
         drives=drives_data,
+        mailbox=mailbox_data,
+        inbox=inbox,
+        db_path=db_path,
+        creator_note=creator_note,
     )
     return world
 
@@ -146,6 +155,10 @@ def load_first_run_world(
     seed: int | None = None,
     settings: Any = None,
     config: Any = None,
+    mailbox: Any = None,
+    inbox: Any = None,
+    db_path: Any = None,
+    creator_note: str | None = None,
 ) -> World:
     """Load the default first-run clearing world from ``worlds/first_run.toml``."""
     return load_world(
@@ -154,6 +167,10 @@ def load_first_run_world(
         seed=seed,
         settings=settings,
         config=config,
+        mailbox=mailbox,
+        inbox=inbox,
+        db_path=db_path,
+        creator_note=creator_note,
     )
 
 

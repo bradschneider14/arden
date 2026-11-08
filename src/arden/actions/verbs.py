@@ -23,6 +23,13 @@ from arden.world.objects import (
     WorldObject,
     validate_world_object,
 )
+from arden.mailbox import (
+    has_lid,
+    is_inside_closed_container,
+    is_mailbox_object,
+    reply,
+    spawn_in_response,
+)
 from arden.world.physics import (
     LEDGE_HEIGHT,
     _get_active_world,
@@ -406,6 +413,8 @@ def in_reach(
             return False
 
     if obj is not None:
+        if is_inside_closed_container(world, obj):
+            return False
         if world.body.holding == obj.id:
             return True
         dist = math.hypot(obj.position.x - body_pos.x, obj.position.y - body_pos.y)
@@ -847,6 +856,14 @@ def look(
                 _apply_rule_state_updates(resolved_world, target_obj, rule)
         refreshed = resolved_world.objects.get(target_obj.id, target_obj)
         perceptible = refreshed.perceptible()
+        if "text" in perceptible.get("state", {}):
+            perceptible["text"] = perceptible["state"]["text"]
+        if has_lid(refreshed) and refreshed.state.get("lid") == "open":
+            perceptible["contents"] = [
+                o.perceptible()
+                for oid, o in sorted(resolved_world.objects.items())
+                if o.level == f"inside:{refreshed.id}"
+            ]
         _record_verb_activity(resolved_world, "look")
     finally:
         unsub()
@@ -1252,6 +1269,28 @@ def grab(
 
     mods = _resolve_modifiers(resolved_world, modifiers)
     target_obj = _resolve_target_object(resolved_world, actual_target)
+
+    if target_obj is not None and has_lid(target_obj):
+        if not in_reach(resolved_world, target_obj, modifiers=mods):
+            return ActionResult(ok=False, reason=OUT_OF_REACH)
+        _record_verb_activity(resolved_world, "grab")
+        captured_lid: list[WorldEvent] = []
+        unsub_lid = resolved_world.subscribe(captured_lid.append)
+        try:
+            new_lid = resolved_world._mailbox_manager.toggle_lid(target_obj.id, source="agent")
+        finally:
+            unsub_lid()
+        updated_mb = resolved_world.objects[target_obj.id]
+        return ActionResult(
+            ok=True,
+            reason=None,
+            events=captured_lid,
+            data={
+                "object_id": target_obj.id,
+                "lid": new_lid,
+                "state": dict(updated_mb.state),
+            },
+        )
 
     if resolved_world.body.holding is not None:
         if target_obj is not None and resolved_world.body.holding == target_obj.id:
@@ -1917,6 +1956,47 @@ def insert(
             data={"reason_detail": "not_hollow"},
         )
 
+    if has_lid(target_obj) and target_obj.state.get("lid") == "closed":
+        return ActionResult(
+            ok=False,
+            reason=NOTHING_HAPPENED,
+            data={"reason_detail": "lid_closed"},
+        )
+
+    if is_mailbox_object(target_obj) and target_obj.state.get("lid") == "open":
+        captured_mb: list[WorldEvent] = []
+        unsub_mb = resolved_world.subscribe(captured_mb.append)
+        try:
+            if resolved_world.body.holding == held_obj.id:
+                resolved_world.body.holding = None
+                resolved_world._auto_held_composite_id = None
+            if held_obj.level.startswith("inside:"):
+                _detach_from_container(resolved_world, held_obj)
+            for upper_id in sorted(resolved_world.objects):
+                upper = resolved_world.objects.get(upper_id)
+                if upper is not None and upper.level == f"on_top_of:{held_obj.id}":
+                    resolved_world._topple_object(
+                        upper.id,
+                        support=held_obj,
+                        move_dx=0.0,
+                        move_dy=0.0,
+                        source="agent",
+                    )
+            _record_verb_activity(resolved_world, "insert")
+            resolved_world._mailbox_manager.deliver_inserted_object(held_obj, target_obj)
+        finally:
+            unsub_mb()
+        return ActionResult(
+            ok=True,
+            reason=None,
+            events=captured_mb,
+            data={
+                "inserted": held_obj.id,
+                "into": target_obj.id,
+                "container_id": target_obj.id,
+            },
+        )
+
     current_contents = [
         o for o in resolved_world.objects.values()
         if o.level == f"inside:{target_obj.id}" and o.id != held_obj.id
@@ -2088,6 +2168,21 @@ def separate(
     unsub = resolved_world.subscribe(captured.append)
     try:
         _record_verb_activity(resolved_world, "separate")
+        # Case 0: Object with a lid (e.g. mailbox) toggles its lid
+        if has_lid(target_obj):
+            new_lid = resolved_world._mailbox_manager.toggle_lid(target_obj.id, source="agent")
+            updated_mb = resolved_world.objects[target_obj.id]
+            return ActionResult(
+                ok=True,
+                reason=None,
+                events=captured,
+                data={
+                    "separated": target_obj.id,
+                    "object_id": target_obj.id,
+                    "lid": new_lid,
+                    "state": dict(updated_mb.state),
+                },
+            )
         # Case 1: Bound Composite
         if isinstance(target_obj, Composite) and target_obj.join_type == "bind" and target_obj.parts:
             restored = _separate_bound_composite(resolved_world, target_obj, source="agent")
@@ -2238,7 +2333,7 @@ def speak(
         resolved_world = _resolve_world(world)
         actual_text = world_or_text
 
-    _ = _resolve_modifiers(resolved_world, modifiers)
+    mods = _resolve_modifiers(resolved_world, modifiers)
 
     if not isinstance(actual_text, str):
         return ActionResult(ok=False, reason=INVALID_PARAMS)
@@ -2255,15 +2350,7 @@ def speak(
             )
         )
         _record_verb_activity(resolved_world, "speak")
-        if False:
-            resolved_world.events.emit(
-                SpokeEvent(
-                    tick=resolved_world.tick,
-                    source="agent",
-                    text=actual_text,
-                position=resolved_world.body.position.model_copy(),
-            )
-        )
+        resolved_world._mailbox_manager.capture_speech(actual_text, modifiers=mods)
     finally:
         unsub()
 
@@ -2746,10 +2833,11 @@ __all__ = [
     "push",
     "register_action",
     "register_opaque_action",
+    "reply",
     "rest",
     "run_opaque_action",
-    "run_opaque_action",
     "separate",
+    "spawn_in_response",
     "speak",
     "stack",
     "strike",

@@ -168,6 +168,14 @@ unexplained_pull = 0.2
 # Position/displacement tolerance in meters for the cheap expectation movement check.
 movement_tolerance = 0.25
 
+[mailbox]
+# Probability in [0.0, 1.0] per in-game hour that a closed mailbox lid swings open on its own.
+lid_drift_chance = 0.0
+# Simulated time delay in seconds before captured speech in an open mailbox is delivered if the lid stays open.
+delivery_delay_s = 10.0
+# Path to the SQLite creator inbox and mail audit log database.
+db_path = "data/mailbox.db"
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"

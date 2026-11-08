@@ -278,7 +278,7 @@ state = { wet = true }
 
 [[objects]]
 id = "object_15"
-creator_label = "mailbox placeholder"
+creator_label = "mailbox"
 position = { x = 6.5, y = 1.2 }
 level = "ground"
 shape = "cube"
@@ -291,8 +291,12 @@ hollow = true
 fragile = false
 color = "blue"
 fixed = true
+state = { lid = "closed" }
 behavior = [
-    { verb = "action_1" },
+    { verb = "grab", response = "toggle_lid" },
+    { verb = "separate", response = "toggle_lid" },
+    { verb = "speak", response = "capture_mail" },
+    { verb = "insert", response = "send_object" },
 ]
 
 # --- Deliberate friction: objects on the raised rock ledge (out of reach from ground) ---
