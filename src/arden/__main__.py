@@ -9,6 +9,7 @@ import random
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from arden import __version__
 from arden.agent.loop import (
@@ -21,6 +22,7 @@ from arden.config import Settings, load_config, make_rng
 from arden.llm.factory import make_backend
 from arden.llm.prompts import build_decide_prompt
 from arden.llm.schemas import Intent
+from arden.world.world import World
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to arden.toml. Defaults to ./arden.toml when that file exists.",
+    )
+    run_parser.add_argument(
+        "--world",
+        type=Path,
+        default=None,
+        help="Path to a world definition file (e.g. worlds/first_run.toml).",
     )
     run_parser.add_argument(
         "--ticks",
@@ -73,6 +81,7 @@ def run_simulation(
     *,
     ticks: int = DEFAULT_RUN_TICKS,
     heartbeat_interval: int | None = None,
+    world: World | Path | str | None = None,
 ) -> AgentLoop:
     """Run one headless simulation and print a one-line summary per wake."""
     return run_headless(
@@ -80,6 +89,7 @@ def run_simulation(
         rng=rng,
         ticks=ticks,
         heartbeat_interval=heartbeat_interval,
+        world=world,
         print_wakes=True,
     )
 
@@ -129,12 +139,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.llm is not None:
             settings.llm.backend = args.llm
         rng = make_rng(settings)
-        kwargs: dict[str, int] = {}
+        kwargs: dict[str, Any] = {}
         sig = inspect.signature(run_simulation)
         if args.ticks is not None and "ticks" in sig.parameters:
             kwargs["ticks"] = args.ticks
         if args.heartbeat is not None and "heartbeat_interval" in sig.parameters:
             kwargs["heartbeat_interval"] = args.heartbeat
+        if args.world is not None and "world" in sig.parameters:
+            kwargs["world"] = args.world
         run_simulation(settings, rng, **kwargs)
         return 0
     if args.command == "llm-smoke":

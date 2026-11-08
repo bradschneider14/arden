@@ -451,14 +451,71 @@ class TerrainGrid:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TerrainGrid:
-        """Restore a ``TerrainGrid`` from ``to_dict()`` output."""
-        return cls(
+        """Restore a ``TerrainGrid`` from ``to_dict()`` output or world definition mapping."""
+        raw_tiles = data.get("tiles")
+        tile_map: dict[tuple[int, int] | str, Any] | None = None
+        if isinstance(raw_tiles, Mapping):
+            tile_map = dict(raw_tiles)
+
+        grid = cls(
             width=data.get("width"),
             height=data.get("height"),
             tile_size=float(data.get("tile_size", 1.0)),
             default_type=data.get("default_type", "grass"),
-            tiles=data.get("tiles"),
         )
+
+        regions = data.get("regions")
+        if isinstance(regions, Iterable) and not isinstance(regions, Mapping | str | bytes):
+            for region in regions:
+                if not isinstance(region, Mapping):
+                    raise TypeError("each terrain region must be a mapping")
+                x0 = int(region["x0"])
+                y0 = int(region["y0"])
+                x1 = int(region.get("x1", x0))
+                y1 = int(region.get("y1", y0))
+                tile_type = region.get("type", grid.default_type)
+                flow = region.get("flow")
+                for tx in range(min(x0, x1), max(x0, x1) + 1):
+                    for ty in range(min(y0, y1), max(y0, y1) + 1):
+                        grid.set_tile(
+                            (tx + 0.5) * grid.tile_size,
+                            (ty + 0.5) * grid.tile_size,
+                            tile_type,
+                            flow=flow,
+                        )
+
+        if tile_map is not None:
+            for key, value in tile_map.items():
+                if isinstance(key, str):
+                    parts = key.split(",")
+                    if len(parts) != 2:
+                        raise ValueError(f"invalid tile coordinate key: {key!r}")
+                    coord = (int(parts[0]), int(parts[1]))
+                elif isinstance(key, tuple) and len(key) == 2:
+                    coord = (int(key[0]), int(key[1]))
+                else:
+                    raise TypeError("tile keys must be (tx, ty) tuples or 'tx,ty' strings")
+                grid.set_tile(
+                    (coord[0] + 0.5) * grid.tile_size,
+                    (coord[1] + 0.5) * grid.tile_size,
+                    value,
+                )
+        elif isinstance(raw_tiles, Iterable) and not isinstance(raw_tiles, str | bytes):
+            for entry in raw_tiles:
+                if not isinstance(entry, Mapping):
+                    raise TypeError("each tile entry must be a mapping")
+                tx = int(entry["x"])
+                ty = int(entry["y"])
+                tile_type = entry.get("type", grid.default_type)
+                flow = entry.get("flow")
+                grid.set_tile(
+                    (tx + 0.5) * grid.tile_size,
+                    (ty + 0.5) * grid.tile_size,
+                    tile_type,
+                    flow=flow,
+                )
+
+        return grid
 
 
 def objects_overlap(a: WorldObject, b: WorldObject, *, tolerance: float = 1e-5) -> bool:
