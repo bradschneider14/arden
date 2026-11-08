@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol, runtime_checkable
 
-LLM_ROLES = ("decide", "reflect", "name")
+LLM_ROLES = ("decide", "reflect", "name", "judge")
 
 
 class LLMOutputError(Exception):

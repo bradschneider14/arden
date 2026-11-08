@@ -6,7 +6,7 @@ import json
 import random
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -48,6 +48,7 @@ from arden.memory.beliefs import (
 from arden.memory.short_term import MemoryManager
 from arden.memory.store import EpisodeStore
 from arden.perception.feed import Percept, PerceptionTracker, perceive
+from arden.surprise.scorer import SurpriseScorer, SurpriseSignal
 from arden.world.clock import WorldClock
 from arden.world.objects import BehaviorRule, Position
 from arden.world.world import (
@@ -75,6 +76,7 @@ class TickResult:
     llm_error: Exception | None = None
     summary: str | None = None
     prompt: BuiltPrompt | None = None
+    surprise_signal: SurpriseSignal | None = None
 
     @property
     def woke(self) -> bool:
@@ -256,6 +258,7 @@ class AgentLoop:
         retrieval_k: int | None = None,
         k: int | None = None,
         perception_tracker: PerceptionTracker | None = None,
+        surprise_scorer: SurpriseScorer | None = None,
         on_wake: Callable[[str], None] | None = None,
         print_wakes: bool = False,
     ) -> None:
@@ -328,6 +331,7 @@ class AgentLoop:
             self.self_model = self_model if self_model is not None else "none"
         self.memories: list[Any] = list(memories or ())
         self.perception_tracker: PerceptionTracker | None = perception_tracker
+        self.surprise_scorer: SurpriseScorer | None = surprise_scorer
         self.on_wake: Callable[[str], None] | None = on_wake
         self.print_wakes: bool = bool(print_wakes)
 
@@ -447,9 +451,33 @@ class AgentLoop:
             percept = perceive(self.world)
 
         # 2. Gate decides wake or continue
-        surprise_val = float(
-            getattr(self.world, "surprise", getattr(self.world, "surprise_score", 0.0)) or 0.0
-        )
+        surprise_signal: SurpriseSignal | None = None
+        raw_world_surprise = getattr(self.world, "surprise", getattr(self.world, "surprise_score", None))
+        if raw_world_surprise is not None:
+            surprise_val = float(raw_world_surprise or 0.0)
+        elif self.surprise_scorer is not None:
+            ended_ev = self._pending_intent_ended_event
+            if self._pending_intent_ended and ended_ev is not None and ended_ev.intent is not None:
+                surprise_signal = self.surprise_scorer.score_expectation(
+                    ended_ev.intent,
+                    ended_ev,
+                    after_state=self.world,
+                    world=self.world,
+                )
+            elif self.belief_store is not None:
+                surprise_signal = self.surprise_scorer.score_belief(
+                    percept.to_text(),
+                    self.belief_store,
+                    world=self.world,
+                )
+            else:
+                surprise_signal = self.surprise_scorer.score_physical(
+                    self.world,
+                    world=self.world,
+                )
+            surprise_val = float(surprise_signal.error_score)
+        else:
+            surprise_val = 0.0
         context = GateContext(
             tick=current_tick,
             percept=percept,
@@ -640,6 +668,7 @@ class AgentLoop:
             llm_error=llm_error,
             summary=summary,
             prompt=built_prompt,
+            surprise_signal=surprise_signal,
         )
 
     step = tick
