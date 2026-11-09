@@ -676,10 +676,10 @@ class SelfModel:
             p_str = str(db_path)
             if p_str != ":memory:":
                 Path(p_str).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(p_str)
+            self._conn = sqlite3.connect(p_str, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         else:
-            self._conn = sqlite3.connect(":memory:")
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
 
         self._conn.executescript(_CREATE_BELIEFS_AND_SELF_MODEL_SQL)
@@ -891,7 +891,10 @@ class BeliefStore:
             self.db_path = Path(raw_path_str)
             if not self._is_memory_db:
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(":memory:" if self._is_memory_db else str(self.db_path))
+            self._conn = sqlite3.connect(
+                ":memory:" if self._is_memory_db else str(self.db_path),
+                check_same_thread=False,
+            )
             self._conn.row_factory = sqlite3.Row
 
         self._conn.executescript(_CREATE_BELIEFS_AND_SELF_MODEL_SQL)
@@ -938,7 +941,8 @@ class BeliefStore:
     def connection(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(
-                ":memory:" if self._is_memory_db else str(self.db_path)
+                ":memory:" if self._is_memory_db else str(self.db_path),
+                check_same_thread=False,
             )
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_CREATE_BELIEFS_AND_SELF_MODEL_SQL)

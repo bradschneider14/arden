@@ -9,11 +9,14 @@ description = "A locally run virtual world with an embodied agent."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi",
     "pydantic>=2",
+    "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "httpx",
     "pytest",
     "ruff",
 ]

@@ -445,7 +445,8 @@ class CreatorInbox:
             self._conn: sqlite3.Connection | None = connection
         else:
             self._conn = sqlite3.connect(
-                ":memory:" if self._is_memory_db else str(self.db_path)
+                ":memory:" if self._is_memory_db else str(self.db_path),
+                check_same_thread=False,
             )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_CREATE_MAILBOX_TABLES_SQL)
@@ -456,7 +457,8 @@ class CreatorInbox:
         """Return the active SQLite connection, reopening if needed."""
         if self._conn is None:
             self._conn = sqlite3.connect(
-                ":memory:" if self._is_memory_db else str(self.db_path)
+                ":memory:" if self._is_memory_db else str(self.db_path),
+                check_same_thread=False,
             )
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_CREATE_MAILBOX_TABLES_SQL)
