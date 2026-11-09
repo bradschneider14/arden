@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Arden — Live World Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script
+      src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js"
+      crossorigin="anonymous"
+    ></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="top-hud">
+        <div class="brand-group">
+          <h1 class="brand-title">Arden Live World</h1>
+          <div id="conn-badge" class="conn-badge" data-status="connecting">
+            <span class="conn-dot"></span>
+            <span id="conn-text">Connecting…</span>
+          </div>
+        </div>
+
+        <div class="hud-metrics">
+          <div class="hud-pill">
+            <span class="hud-label">Tick</span>
+            <span id="hud-tick" class="hud-val">0</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Time</span>
+            <span id="hud-time" class="hud-val">12:00 (Day)</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Light</span>
+            <span id="hud-light" class="hud-val">1.00 (Day)</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Temp</span>
+            <span id="hud-temp" class="hud-val">1.00</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Weather</span>
+            <span id="hud-weather" class="hud-val" data-weather="clear">clear</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Wind</span>
+            <span id="hud-wind" class="hud-val">calm</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Energy</span>
+            <span id="hud-energy" class="hud-val">1.00</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Comfort</span>
+            <span id="hud-comfort" class="hud-val">1.00</span>
+          </div>
+          <div class="hud-pill">
+            <span class="hud-label">Holding</span>
+            <span id="hud-holding" class="hud-val">none</span>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="viewport-wrap" aria-label="Top-down world map">
+          <canvas id="world-canvas"></canvas>
+
+          <div class="viewport-controls">
+            <button id="btn-zoom-out" class="ctrl-btn" type="button" title="Zoom out (-)">
+              &minus;
+            </button>
+            <span id="zoom-label" class="zoom-label">100%</span>
+            <button id="btn-zoom-in" class="ctrl-btn" type="button" title="Zoom in (+)">
+              +
+            </button>
+            <button id="btn-reset-view" class="ctrl-btn" type="button" title="Reset view (0)">
+              Reset
+            </button>
+          </div>
+
+          <div class="agent-banner">
+            <div class="agent-banner-item">
+              <span class="hud-label">Agent</span>
+              <span id="hud-agent-pos" class="hud-val">(6.5, 6.5) [ground]</span>
+            </div>
+            <div class="agent-banner-item">
+              <span class="hud-label">Goal</span>
+              <span id="hud-agent-goal" class="hud-val">idle</span>
+            </div>
+            <div class="agent-banner-item">
+              <span class="hud-label">Thought</span>
+              <span id="hud-agent-thought" class="hud-val">—</span>
+            </div>
+          </div>
+
+          <div id="hover-tooltip" class="hover-tooltip" hidden></div>
+        </section>
+
+        <aside class="sidebar">
+          <section id="object-inspector" class="panel-section panel-section-inspector" data-empty="true">
+            <div class="panel-header">
+              <h2 class="panel-title">Object Inspector</h2>
+              <button id="btn-close-inspector" class="ctrl-btn" type="button" title="Clear selection">
+                &times;
+              </button>
+            </div>
+            <div id="inspector-body">
+              <p class="inspector-placeholder">
+                Click any object in the world (or in the object list below) to inspect its internal ID and physical properties.
+              </p>
+            </div>
+          </section>
+
+          <section class="panel-section panel-section-list">
+            <div class="panel-header">
+              <h2 class="panel-title">World Objects (<span id="object-count">0</span>)</h2>
+            </div>
+            <div id="object-list" class="object-list"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import mimetypes
 import os
 import random
 import secrets
@@ -16,6 +17,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 from arden import __version__
 from arden.agent.gate import Gate, GateDecisionEvent
@@ -75,6 +77,46 @@ from arden.world.world import (
 
 SCHEMA_VERSION: int = 1
 WS_SCHEMA_VERSION: int = SCHEMA_VERSION
+
+STATIC_DIR: Path = Path(__file__).resolve().parent.parent / "web" / "static"
+
+_STATIC_MEDIA_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+}
+
+for _ext, _mime in _STATIC_MEDIA_TYPES.items():
+    mimetypes.add_type(_mime.split(";")[0], _ext)
+
+
+def _serve_static_file(rel_path: str) -> FileResponse:
+    """Resolve and serve a static asset from ``src/arden/web/static/``."""
+    base = STATIC_DIR.resolve()
+    cleaned = rel_path.lstrip("/\\") or "index.html"
+    try:
+        candidate = (base / cleaned).resolve()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Static asset not found") from exc
+
+    if candidate != base and base not in candidate.parents:
+        raise HTTPException(status_code=404, detail="Static asset not found")
+    if candidate.is_dir():
+        candidate = (candidate / "index.html").resolve()
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Static asset not found")
+
+    media_type = _STATIC_MEDIA_TYPES.get(candidate.suffix.lower())
+    if media_type is None:
+        guessed, _ = mimetypes.guess_type(str(candidate))
+        media_type = guessed or "application/octet-stream"
+    return FileResponse(candidate, media_type=media_type)
+
 
 LOCAL_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
@@ -759,6 +801,7 @@ class SimulationService:
                 "type": self.world.weather_type,
                 "intensity": self.world.weather_intensity,
                 "paused": self.world.weather_automation_paused,
+                "wind_direction": self.world.weather.wind_direction.model_dump(mode="json"),
             },
             "delta": delta_payload,
         }
@@ -1696,10 +1739,18 @@ def create_app(
             )
 
     # ------------------------------------------------------------------
-    # Read endpoints
+    # Static client & Read endpoints
     # ------------------------------------------------------------------
 
     @app.get("/", dependencies=[Depends(_require_read_access)])
+    @app.get("/index.html", dependencies=[Depends(_require_read_access)])
+    async def get_root_index() -> FileResponse:
+        return _serve_static_file("index.html")
+
+    @app.get("/static/{file_path:path}", dependencies=[Depends(_require_read_access)])
+    async def get_static_prefixed(file_path: str) -> FileResponse:
+        return _serve_static_file(file_path)
+
     @app.get("/health", dependencies=[Depends(_require_read_access)])
     @app.get("/status", dependencies=[Depends(_require_read_access)])
     @app.get("/api/status", dependencies=[Depends(_require_read_access)])
@@ -2432,6 +2483,10 @@ def create_app(
                 except (asyncio.CancelledError, Exception):
                     pass
             sim_service.unregister_ws_queue(queue)
+
+    @app.get("/{file_path:path}", dependencies=[Depends(_require_read_access)])
+    async def get_static_root_asset(file_path: str) -> FileResponse:
+        return _serve_static_file(file_path)
 
     return app
 
