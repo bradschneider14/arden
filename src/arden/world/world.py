@@ -113,6 +113,10 @@ EventType = Literal[
     "buffer_full",
     "reflection",
     "belief_evicted",
+    "perception",
+    "action_result",
+    "belief_change",
+    "creator_action",
     "tick",
 ]
 EVENT_TYPES: frozenset[str] = frozenset(
@@ -134,6 +138,10 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "buffer_full",
         "reflection",
         "belief_evicted",
+        "perception",
+        "action_result",
+        "belief_change",
+        "creator_action",
         "tick",
     }
 )
@@ -151,6 +159,12 @@ _EVENT_TYPE_ALIASES: dict[str, str] = {
     "belief_eviction": "belief_evicted",
     "eviction": "belief_evicted",
     "belief_forgotten": "belief_evicted",
+    "belief_changed": "belief_change",
+    "belief": "belief_change",
+    "percept": "perception",
+    "intent": "intent_set",
+    "action": "action_result",
+    "creator": "creator_action",
     "decision": "gate_decision",
     "mail": "mail_arrived",
     "letter_arrived": "mail_arrived",
@@ -366,6 +380,7 @@ class WeatherChangedEvent(WorldEvent):
     duration: int = Field(gt=0)
     light_level: float | None = None
     ambient_temperature: float | None = None
+    from_schedule: bool = False
 
     @property
     def weather(self) -> WeatherType:
@@ -588,6 +603,63 @@ class BeliefEvictedEvent(WorldEvent):
         return self.belief
 
 
+class PerceptionEvent(WorldEvent):
+    """Emitted when the agent perceives the world on a tick."""
+
+    type: Literal["perception"] = "perception"
+    source: str = "perception"
+    percept: Any = None
+    object_ids: list[str] = Field(default_factory=list)
+    is_delta: bool = False
+
+
+class ActionResultEvent(WorldEvent):
+    """Emitted when an agent verb or controller action executes."""
+
+    type: Literal["action_result"] = "action_result"
+    source: str = "agent"
+    verb: str = ""
+    target: str | None = None
+    into: str | None = None
+    with_id: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    ok: bool = True
+    reason: str | None = None
+    events: list[Any] = Field(default_factory=list)
+    data: dict[str, Any] = Field(default_factory=dict)
+    result: Any = None
+
+
+class BeliefChangeEvent(WorldEvent):
+    """Emitted when a semantic belief is created, supported, contradicted, or evicted."""
+
+    type: Literal["belief_change"] = "belief_change"
+    source: str = "memory"
+    action: Literal["created", "support", "contradict", "evicted"] = "created"
+    belief_id: int | None = None
+    statement: str = ""
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    previous_confidence: float | None = None
+    delta: float = 0.0
+    evidence_count: int = 1
+    belief: Any = None
+
+    @property
+    def outcome(self) -> str:
+        """Alias for ``action``."""
+        return self.action
+
+
+class CreatorActionEvent(WorldEvent):
+    """Emitted when the creator performs an intervention on the world."""
+
+    type: Literal["creator_action"] = "creator_action"
+    source: str = "creator"
+    action: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 EventHandler = Callable[[WorldEvent], None]
 
 
@@ -774,6 +846,7 @@ class World:
             if seed is not None
             else (rng if isinstance(rng, int) and not isinstance(rng, bool) else 0)
         )
+        self.seed: int = int(default_w_seed)
         if weather is None:
             self.weather: WeatherSystem = WeatherSystem(seed=default_w_seed)
         elif isinstance(weather, str):
@@ -866,6 +939,13 @@ class World:
             "wake",
             "intent_set",
             "llm_error",
+            "buffer_full",
+            "reflection",
+            "belief_evicted",
+            "perception",
+            "action_result",
+            "belief_change",
+            "creator_action",
         ):
             return
         if event.type == "object_spawned" and not self._has_been_perceived:
@@ -1279,6 +1359,7 @@ class World:
         previous_intensity: float,
         intensity: float,
         duration: int,
+        from_schedule: bool = False,
     ) -> None:
         self.events.emit(
             WeatherChangedEvent(
@@ -1291,6 +1372,7 @@ class World:
                 duration=duration,
                 light_level=self.light_level,
                 ambient_temperature=self.ambient_temperature,
+                from_schedule=from_schedule,
             )
         )
 
@@ -1306,7 +1388,7 @@ class World:
     ) -> WeatherState:
         """Set or schedule a manual weather event on the world."""
         _set_active_world(self)
-        return self.weather.set_weather(
+        res = self.weather.set_weather(
             type,
             intensity,
             duration,
@@ -1315,21 +1397,57 @@ class World:
             wind_direction=wind_direction,
             current_tick=self.tick,
         )
+        if start_at is not None and int(start_at) > self.tick:
+            self.events.emit(
+                CreatorActionEvent(
+                    tick=self.tick,
+                    source="creator",
+                    action="schedule_weather",
+                    weather_type=res.type,
+                    intensity=res.intensity,
+                    duration=res.duration,
+                    details={
+                        "weather_type": res.type,
+                        "intensity": res.intensity,
+                        "duration": res.duration,
+                        "start_at": int(start_at),
+                    },
+                )
+            )
+        return res
 
     def pause_weather_automation(self, paused: bool = True) -> bool:
         """Pause or unpause automated weather transitions."""
         _set_active_world(self)
-        return self.weather.pause_automation(paused)
+        res = self.weather.pause_automation(paused)
+        self.events.emit(
+            CreatorActionEvent(
+                tick=self.tick,
+                source="creator",
+                action="set_weather_automation",
+                details={"enabled": not res, "paused": res},
+            )
+        )
+        return res
 
     def resume_weather_automation(self) -> bool:
         """Resume automated weather transitions."""
         _set_active_world(self)
-        return self.weather.resume_automation()
+        return self.pause_weather_automation(False)
 
     def set_weather_automation(self, enabled: bool) -> bool:
         """Enable or disable automated weather transitions."""
         _set_active_world(self)
-        return self.weather.set_automation(enabled)
+        res = self.weather.set_automation(enabled)
+        self.events.emit(
+            CreatorActionEvent(
+                tick=self.tick,
+                source="creator",
+                action="set_weather_automation",
+                details={"enabled": res, "paused": not res},
+            )
+        )
+        return res
 
     pause_weather = pause_weather_automation
     resume_weather = resume_weather_automation

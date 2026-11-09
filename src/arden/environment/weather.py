@@ -674,6 +674,7 @@ class WeatherSystem:
         source: WeatherSource,
         previous_type: WeatherType,
         previous_intensity: float,
+        from_schedule: bool = False,
     ) -> None:
         from arden.world.world import WeatherChangedEvent
 
@@ -695,6 +696,7 @@ class WeatherSystem:
                 if self._world_ref is not None
                 else 1.0 - self.temperature_drop
             ),
+            from_schedule=from_schedule,
         )
         self.events.append(ev)
         for sub in list(self._subscribers):
@@ -708,6 +710,7 @@ class WeatherSystem:
                 previous_intensity=previous_intensity,
                 intensity=self._intensity,
                 duration=self._duration,
+                from_schedule=from_schedule,
             )
 
     def pause_automation(self, paused: bool = True) -> bool:
@@ -858,6 +861,7 @@ class WeatherSystem:
             source="manual",
             previous_type=prev_type,
             previous_intensity=prev_intensity,
+            from_schedule=from_schedule,
         )
 
     def _resume_automated_after_manual(self, tick: int) -> None:

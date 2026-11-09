@@ -37,7 +37,8 @@ from arden.config import (
     MemoryConfig,
     Settings,
 )
-from arden.world.world import BeliefEvictedEvent, EventBus, World
+from arden.world.physics import _get_active_world
+from arden.world.world import BeliefChangeEvent, BeliefEvictedEvent, EventBus, World
 
 if TYPE_CHECKING:
     from arden.memory.store import Episode, EpisodeStore
@@ -1035,6 +1036,34 @@ class BeliefStore:
             conn.commit()
             return belief
 
+    def _emit_belief_change(
+        self,
+        belief: Belief,
+        *,
+        action: Literal["created", "support", "contradict", "evicted"],
+        tick: int,
+        previous_confidence: float | None = None,
+        delta: float = 0.0,
+    ) -> BeliefChangeEvent:
+        ev = BeliefChangeEvent(
+            tick=max(0, int(tick)),
+            source="memory",
+            action=action,
+            belief_id=belief.id,
+            statement=belief.statement,
+            tags=list(belief.tags),
+            confidence=belief.confidence,
+            previous_confidence=previous_confidence,
+            delta=round(float(delta), 6),
+            evidence_count=belief.evidence_count,
+            belief=belief.to_dict(),
+        )
+        self.events.emit(ev)
+        resolved_world = self.world if self.world is not None else _get_active_world()
+        if resolved_world is not None and resolved_world.events is not self.events:
+            resolved_world.events.emit(ev)
+        return ev
+
     def _emit_eviction(
         self,
         belief: Belief,
@@ -1058,8 +1087,16 @@ class BeliefStore:
         self.eviction_events.append(ev)
         self.evicted_beliefs.append(belief)
         self.events.emit(ev)
-        if self.world is not None and self.world.events is not self.events:
-            self.world.events.emit(ev)
+        resolved_world = self.world if self.world is not None else _get_active_world()
+        if resolved_world is not None and resolved_world.events is not self.events:
+            resolved_world.events.emit(ev)
+        self._emit_belief_change(
+            belief,
+            action="evicted",
+            tick=current_tick,
+            previous_confidence=belief.confidence,
+            delta=-belief.confidence,
+        )
         return ev
 
     def evict_lowest(self, current_tick: int | None = None) -> Belief | None:
@@ -1254,7 +1291,15 @@ class BeliefStore:
         if self.count() >= self.max_beliefs:
             self._enforce_cap(self._current_tick, reserve=1)
 
-        return self._save_belief_row(validated)
+        saved = self._save_belief_row(validated)
+        self._emit_belief_change(
+            saved,
+            action="created",
+            tick=saved.updated_tick,
+            previous_confidence=None,
+            delta=saved.confidence,
+        )
+        return saved
 
     propose = add
     save = add
@@ -1293,9 +1338,18 @@ class BeliefStore:
                 )
             return None
 
+        prev_conf = found.confidence
         eff_delta = float(delta) if delta is not None else self.config.belief_support_delta
         found.support(tick=eff_tick, delta=eff_delta, tags=tags, note=note)
-        return self._save_belief_row(found)
+        saved = self._save_belief_row(found)
+        self._emit_belief_change(
+            saved,
+            action="support",
+            tick=eff_tick,
+            previous_confidence=prev_conf,
+            delta=round(saved.confidence - prev_conf, 6),
+        )
+        return saved
 
     def contradict(
         self,
@@ -1331,9 +1385,18 @@ class BeliefStore:
             int(tick) if tick is not None else self._current_tick,
         )
         self._current_tick = max(self._current_tick, eff_tick)
+        prev_conf = found.confidence
         eff_delta = float(delta) if delta is not None else self.config.belief_contradict_delta
         found.contradict(tick=eff_tick, delta=eff_delta, tags=tags, note=note)
-        return self._save_belief_row(found)
+        saved = self._save_belief_row(found)
+        self._emit_belief_change(
+            saved,
+            action="contradict",
+            tick=eff_tick,
+            previous_confidence=prev_conf,
+            delta=round(saved.confidence - prev_conf, 6),
+        )
+        return saved
 
     refute = contradict
 

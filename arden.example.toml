@@ -204,3 +204,11 @@ max_retries = 2
 [logging]
 # Process log level. Separate from the observer log.
 level = "INFO"
+
+[observer]
+# Base directory where per-run observer logs are written (`data/runs/<run_id>/`).
+runs_dir = "data/runs"
+# Maximum size in bytes per JSONL log file before rotating to a new file.
+max_bytes = 1048576
+# Whether the observer log is enabled by default for runs.
+enabled = true

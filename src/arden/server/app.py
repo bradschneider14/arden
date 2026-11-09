@@ -49,6 +49,8 @@ from arden.memory.beliefs import (
 )
 from arden.memory.short_term import MemoryManager, ReflectionEvent
 from arden.memory.store import EpisodeStore
+from arden.observer.compare import compare as compare_beliefs_with_log
+from arden.observer.log import ObserverLog
 from arden.perception.feed import PerceptionTracker, perceive
 from arden.surprise.scorer import SurpriseScorer, SurpriseSignal
 from arden.world.clock import WorldClock
@@ -253,6 +255,11 @@ class SimulationService:
         auto_start: bool | None = None,
         paused: bool | None = None,
         db_path: Path | str | None = None,
+        observer_log: ObserverLog | bool | None = None,
+        run_id: str | None = None,
+        runs_dir: Path | str | None = None,
+        run_dir: Path | str | None = None,
+        max_bytes: int | None = None,
     ) -> None:
         raw_cfg = settings if settings is not None else config
         if raw_cfg is None:
@@ -395,6 +402,34 @@ class SimulationService:
                 perception_tracker=PerceptionTracker(),
                 surprise_scorer=SurpriseScorer(config=self.settings.surprise, llm=self.llm),
             )
+
+        self.loop._external_memory_recording = True
+        existing_obs = (
+            observer_log
+            if isinstance(observer_log, ObserverLog)
+            else (
+                self.loop.observer_log
+                if self.loop.observer_log is not None
+                else getattr(self.world, "observer_log", None)
+            )
+        )
+        if isinstance(existing_obs, ObserverLog):
+            self.observer_log: ObserverLog | None = existing_obs
+        elif observer_log is False or not self.settings.observer.enabled:
+            self.observer_log = None
+        else:
+            self.observer_log = ObserverLog(
+                self.world,
+                run_id=run_id,
+                runs_dir=runs_dir,
+                run_dir=run_dir,
+                max_bytes=max_bytes,
+                settings=self.settings,
+            )
+        if self.observer_log is not None:
+            self.loop.observer_log = self.observer_log
+            self.observer_log.settings = self.settings
+            self.loop._sync_observer_metadata()
 
         self.clock: WorldClock = self.loop.clock
         self._lock = threading.RLock()
@@ -1301,6 +1336,55 @@ class SimulationService:
                 "effective_tick_rate": self.clock.effective_tick_rate,
             }
 
+    def get_log_payload(
+        self,
+        *,
+        kind: str | Sequence[str] | None = None,
+        from_tick: int | str | None = None,
+        to_tick: int | str | None = None,
+        object_id: str | None = None,
+        limit: int | str | None = None,
+        offset: int | str | None = None,
+        page: int | str | None = None,
+        page_size: int | str | None = None,
+        cursor: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Query the ground-truth observer log with optional filters and paging."""
+        with self._lock:
+            if self.observer_log is None:
+                self.observer_log = ObserverLog(self.world, settings=self.settings)
+                self.loop.observer_log = self.observer_log
+                self.loop._sync_observer_metadata()
+            result = self.observer_log.query_page(
+                kind=kind,
+                from_tick=from_tick,
+                to_tick=to_tick,
+                object_id=object_id,
+                limit=limit,
+                offset=offset,
+                page=page,
+                page_size=page_size,
+                cursor=cursor,
+            )
+            payload = dict(result)
+            payload["run_id"] = self.observer_log.run_id
+            payload["tick"] = self.world.tick
+            return payload
+
+    def get_log_compare_payload(self) -> dict[str, Any]:
+        """Compare semantic beliefs against ground-truth observer log events."""
+        with self._lock:
+            if self.observer_log is None:
+                self.observer_log = ObserverLog(self.world, settings=self.settings)
+                self.loop.observer_log = self.observer_log
+                self.loop._sync_observer_metadata()
+            comp = compare_beliefs_with_log(
+                self.observer_log,
+                self.memory.belief_store,
+                world=self.world,
+            )
+            return comp.to_dict()
+
     # ------------------------------------------------------------------
     # Creator actions
     # ------------------------------------------------------------------
@@ -1582,6 +1666,11 @@ def create_app(
     auto_start: bool | None = None,
     paused: bool | None = None,
     db_path: Path | str | None = None,
+    observer_log: ObserverLog | bool | None = None,
+    run_id: str | None = None,
+    runs_dir: Path | str | None = None,
+    run_dir: Path | str | None = None,
+    max_bytes: int | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application for the Arden simulation server."""
     eff_token = (
@@ -1631,6 +1720,11 @@ def create_app(
             auto_start=auto_start,
             paused=paused,
             db_path=db_path,
+            observer_log=observer_log,
+            run_id=run_id,
+            runs_dir=runs_dir,
+            run_dir=run_dir,
+            max_bytes=max_bytes,
         )
     )
 
@@ -1654,9 +1748,11 @@ def create_app(
     app.state.clock = sim_service.clock
     app.state.memory = sim_service.memory
     app.state.settings = sim_service.settings
+    app.state.observer_log = sim_service.observer_log
     app.service = sim_service  # type: ignore[attr-defined]
     app.world = sim_service.world  # type: ignore[attr-defined]
     app.loop = sim_service.loop  # type: ignore[attr-defined]
+    app.observer_log = sim_service.observer_log  # type: ignore[attr-defined]
 
     def _require_read_access(request: Request) -> None:
         """Enforce read access: allowed if spectator_enabled is True, else requires creator token."""
@@ -1815,6 +1911,49 @@ def create_app(
     @app.get("/api/time", dependencies=[Depends(_require_read_access)])
     async def get_time() -> dict[str, Any]:
         return sim_service.get_time_payload()
+
+    @app.get("/api/log", dependencies=[Depends(_require_read_access)])
+    @app.get("/log", dependencies=[Depends(_require_read_access)])
+    @app.get("/observer/log", dependencies=[Depends(_require_read_access)])
+    @app.get("/api/observer/log", dependencies=[Depends(_require_read_access)])
+    async def get_observer_log(
+        request: Request,
+        kind: str | None = None,
+        from_tick: str | int | None = None,
+        to_tick: str | int | None = None,
+        object_id: str | None = None,
+        limit: str | int | None = None,
+        offset: str | int | None = None,
+        page: str | int | None = None,
+        page_size: str | int | None = None,
+        cursor: str | int | None = None,
+    ) -> dict[str, Any]:
+        # Support multiple ?kind=a&kind=b query params as well as comma-separated kind
+        kind_list = [k for k in request.query_params.getlist("kind") if k and k.strip()]
+        eff_kind: str | Sequence[str] | None = (
+            kind_list if len(kind_list) > 1 else (kind_list[0] if kind_list else kind)
+        )
+        try:
+            return sim_service.get_log_payload(
+                kind=eff_kind,
+                from_tick=from_tick,
+                to_tick=to_tick,
+                object_id=object_id,
+                limit=limit,
+                offset=offset,
+                page=page,
+                page_size=page_size,
+                cursor=cursor,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/log/compare", dependencies=[Depends(_require_read_access)])
+    @app.get("/log/compare", dependencies=[Depends(_require_read_access)])
+    @app.get("/observer/compare", dependencies=[Depends(_require_read_access)])
+    @app.get("/api/observer/compare", dependencies=[Depends(_require_read_access)])
+    async def get_observer_compare() -> dict[str, Any]:
+        return sim_service.get_log_compare_payload()
 
     # ------------------------------------------------------------------
     # Creator endpoints

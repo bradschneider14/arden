@@ -7,5 +7,6 @@ __pycache__/
 dist/
 build/
 
-# Local config. The committed template is arden.example.toml.
+# Local config and runtime data. The committed template is arden.example.toml.
 /arden.toml
+/data/
