@@ -522,7 +522,8 @@ class EpisodeStore:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._conn: sqlite3.Connection | None = sqlite3.connect(
-            ":memory:" if self._is_memory_db else str(self.db_path)
+            ":memory:" if self._is_memory_db else str(self.db_path),
+            check_same_thread=False,
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_CREATE_TABLE_SQL)
@@ -627,7 +628,8 @@ class EpisodeStore:
         """Return an open SQLite connection to the store."""
         if self._conn is None:
             self._conn = sqlite3.connect(
-                ":memory:" if self._is_memory_db else str(self.db_path)
+                ":memory:" if self._is_memory_db else str(self.db_path),
+                check_same_thread=False,
             )
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_CREATE_TABLE_SQL)

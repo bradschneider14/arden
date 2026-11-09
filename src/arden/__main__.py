@@ -22,6 +22,7 @@ from arden.config import Settings, load_config, make_rng
 from arden.llm.factory import make_backend
 from arden.llm.prompts import build_decide_prompt
 from arden.llm.schemas import Intent
+from arden.server.app import run_server as _run_server
 from arden.world.world import World
 
 
@@ -71,6 +72,65 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to arden.toml. Defaults to ./arden.toml when that file exists.",
+    )
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Start the FastAPI simulation server and WebSocket stream",
+    )
+    serve_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to arden.toml. Defaults to ./arden.toml when that file exists.",
+    )
+    serve_parser.add_argument(
+        "--world",
+        type=Path,
+        default=None,
+        help="Path to a world definition file (e.g. worlds/first_run.toml).",
+    )
+    serve_parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host interface to bind (default: 127.0.0.1 or [server].host).",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="TCP port to bind (default: 8000 or [server].port).",
+    )
+    serve_parser.add_argument(
+        "--llm",
+        type=str,
+        default=None,
+        help="Override the configured LLM backend (e.g. 'mock' or 'ollama').",
+    )
+    serve_parser.add_argument(
+        "--token",
+        "--creator-token",
+        dest="token",
+        type=str,
+        default=None,
+        help="Creator authentication token (overrides config and ARDEN_CREATOR_TOKEN).",
+    )
+    spectator_group = serve_parser.add_mutually_exclusive_group()
+    spectator_group.add_argument(
+        "--spectator",
+        "--enable-spectator",
+        dest="spectator_enabled",
+        action="store_true",
+        default=None,
+        help="Enable read-only spectator access.",
+    )
+    spectator_group.add_argument(
+        "--no-spectator",
+        "--disable-spectator",
+        dest="spectator_enabled",
+        action="store_false",
+        help="Disable read-only spectator access.",
     )
     return parser
 
@@ -128,6 +188,28 @@ def run_llm_smoke(settings: Settings) -> Intent:
     return intent
 
 
+def run_server(
+    settings: Settings,
+    rng: random.Random,
+    *,
+    world: World | Path | str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    creator_token: str | None = None,
+    spectator_enabled: bool | None = None,
+) -> Any:
+    """Start the FastAPI simulation server with uvicorn."""
+    return _run_server(
+        settings=settings,
+        rng=rng,
+        world=world,
+        host=host,
+        port=port,
+        creator_token=creator_token,
+        spectator_enabled=spectator_enabled,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -152,6 +234,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "llm-smoke":
         settings = load_config(args.config)
         run_llm_smoke(settings)
+        return 0
+    if args.command == "serve":
+        settings = load_config(args.config)
+        if args.llm is not None:
+            settings.llm.backend = args.llm
+        if args.host is not None:
+            settings.server.host = args.host
+        if args.port is not None:
+            settings.server.port = args.port
+        if args.token is not None:
+            settings.server.creator_token = args.token
+        if args.spectator_enabled is not None:
+            settings.server.spectator_enabled = args.spectator_enabled
+        rng = make_rng(settings)
+        run_server(
+            settings,
+            rng,
+            world=args.world,
+            host=settings.server.host,
+            port=settings.server.port,
+            creator_token=args.token,
+            spectator_enabled=args.spectator_enabled,
+        )
         return 0
     parser.print_help()
     return 0

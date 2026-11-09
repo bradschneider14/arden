@@ -32,6 +32,101 @@ DEFAULT_BELIEF_CONTRADICT_DELTA: float = 0.20
 DEFAULT_RECENCY_DECAY_RATE: float = 0.01
 DEFAULT_MAX_SELF_MODEL_WORDS: int = 80
 DEFAULT_RETRIEVAL_K: int = 5
+DEFAULT_SERVER_HOST: str = "127.0.0.1"
+DEFAULT_SERVER_PORT: int = 8000
+CREATOR_TOKEN_ENV_VAR: str = "ARDEN_CREATOR_TOKEN"
+
+
+class ServerConfig(BaseModel):
+    """Web server, authentication, and spectator settings under ``[server]``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = DEFAULT_SERVER_HOST
+    port: int = Field(default=DEFAULT_SERVER_PORT, gt=0, le=65535)
+    creator_token: str | None = None
+    spectator_enabled: bool = True
+    spectator_mode: bool = False
+    auto_start: bool = True
+    world: Path | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_aliases(cls, values: object) -> object:
+        if not isinstance(values, dict):
+            return values
+        raw = dict(values)
+        for alias in ("bind", "interface", "address"):
+            if alias in raw and "host" not in raw:
+                raw["host"] = raw.pop(alias)
+        for alias in ("token", "auth_token", "api_token"):
+            if alias in raw and "creator_token" not in raw:
+                raw["creator_token"] = raw.pop(alias)
+        for alias in (
+            "spectator",
+            "allow_spectators",
+            "spectator_access",
+            "enable_spectator",
+            "read_only_spectator",
+        ):
+            if alias in raw and "spectator_enabled" not in raw:
+                raw["spectator_enabled"] = raw.pop(alias)
+        for alias in ("read_only", "spectator_only"):
+            if alias in raw and "spectator_mode" not in raw:
+                raw["spectator_mode"] = raw.pop(alias)
+        for alias in ("world_path",):
+            if alias in raw and "world" not in raw:
+                raw["world"] = raw.pop(alias)
+        return raw
+
+    @field_validator("host")
+    @classmethod
+    def _validate_host(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("host must be a non-empty string")
+        return stripped
+
+    @field_validator("creator_token")
+    @classmethod
+    def _validate_creator_token(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped if stripped else None
+
+    @property
+    def bind(self) -> str:
+        """Alias for ``host``."""
+        return self.host
+
+    @property
+    def interface(self) -> str:
+        """Alias for ``host``."""
+        return self.host
+
+    @property
+    def token(self) -> str | None:
+        """Alias for ``creator_token``."""
+        return self.creator_token
+
+    @property
+    def spectator(self) -> bool:
+        """Alias for ``spectator_enabled``."""
+        return self.spectator_enabled
+
+    @property
+    def allow_spectators(self) -> bool:
+        """Alias for ``spectator_enabled``."""
+        return self.spectator_enabled
+
+    @property
+    def read_only(self) -> bool:
+        """Alias for ``spectator_mode``."""
+        return self.spectator_mode
+
+
+ServerSettings = ServerConfig
 
 
 class MemoryConfig(BaseModel):
@@ -229,6 +324,7 @@ class Settings(BaseModel):
     gate: GateSettings = Field(default_factory=GateSettings)
     surprise: SurpriseSettings = Field(default_factory=SurpriseSettings)
     mailbox: MailboxSettings = Field(default_factory=MailboxSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
@@ -266,7 +362,10 @@ def make_rng(settings: Settings) -> random.Random:
 
 
 __all__ = [
+    "CREATOR_TOKEN_ENV_VAR",
     "DEFAULT_CONFIG_PATH",
+    "DEFAULT_SERVER_HOST",
+    "DEFAULT_SERVER_PORT",
     "BodyConfig",
     "BodySettings",
     "DayNightConfig",
@@ -280,6 +379,8 @@ __all__ = [
     "MemoryConfig",
     "MemorySettings",
     "PerceptionSettings",
+    "ServerConfig",
+    "ServerSettings",
     "Settings",
     "SurpriseConfig",
     "SurpriseSettings",

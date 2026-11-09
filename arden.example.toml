@@ -176,6 +176,17 @@ delivery_delay_s = 10.0
 # Path to the SQLite creator inbox and mail audit log database.
 db_path = "data/mailbox.db"
 
+[server]
+# Network interface to bind. Defaults to local loopback only (127.0.0.1).
+# Non-local bindings (such as 0.0.0.0) require a creator_token or ARDEN_CREATOR_TOKEN.
+host = "127.0.0.1"
+# TCP port for the HTTP API and WebSocket server.
+port = 8000
+# Whether unauthenticated read-only spectator access to GET endpoints and /ws is enabled.
+spectator_enabled = true
+# Whether to start the background simulation loop automatically when the server starts.
+auto_start = true
+
 [llm]
 # Backend name: "mock" (default), "ollama", or "openai_compat" / "llama_cpp".
 backend = "mock"
