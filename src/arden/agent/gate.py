@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from arden.mailbox import is_inside_closed_container
 from arden.world.objects import Position
 from arden.world.physics import STOP_SPEED_EPSILON
 from arden.world.world import (
@@ -1044,8 +1045,14 @@ class RuleGate:
                         self.seen_affordances.add(str(aff))
         if world is not None:
             for oid, wobj in world.objects.items():
-                self.seen_objects.add(oid)
-                self._last_object_positions[oid] = wobj.position.model_copy()
+                if not is_inside_closed_container(world, wobj):
+                    self.seen_objects.add(oid)
+                    self._last_object_positions[oid] = wobj.position.model_copy()
+            mailbox = getattr(world, "mailbox", None)
+            if mailbox is not None:
+                arrivals = getattr(mailbox, "arrivals", None)
+                if isinstance(arrivals, Sequence):
+                    self._seen_mail_count = len(arrivals)
 
     observe_baseline = seed_seen
 
@@ -1472,10 +1479,14 @@ class RuleGate:
         if world is not None:
             mailbox = getattr(world, "mailbox", None)
             if mailbox is not None:
-                inbox = getattr(mailbox, "inbox", getattr(mailbox, "messages", getattr(mailbox, "mail", None)))
-                if isinstance(inbox, Sized := Sequence) and len(inbox) > self._seen_mail_count:
+                arrivals = getattr(
+                    mailbox,
+                    "arrivals",
+                    getattr(mailbox, "inbox", getattr(mailbox, "messages", getattr(mailbox, "mail", None))),
+                )
+                if isinstance(arrivals, Sequence) and len(arrivals) > self._seen_mail_count:
                     mail_arrived = True
-                    self._seen_mail_count = len(inbox)
+                    self._seen_mail_count = len(arrivals)
 
         return spawn_nearby, mail_arrived
 
@@ -1531,6 +1542,8 @@ class RuleGate:
 
         if world is not None:
             for oid, wobj in world.objects.items():
+                if is_inside_closed_container(world, wobj):
+                    continue
                 if oid in self._last_object_positions:
                     prev = self._last_object_positions[oid]
                     dist = math.hypot(wobj.position.x - prev.x, wobj.position.y - prev.y)

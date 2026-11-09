@@ -112,11 +112,15 @@ def test_first_run_world_loads_terrain_and_twelve_object_types() -> None:
     assert len(bush) == 1
     assert len(loose_berries) >= 2
 
-    # 9. Mailbox placeholder at the edge of the path offering an opaque action
+    # 9. Mailbox at the edge of the path with a perceptible lid and body-verb rules (no opaque action)
     mailboxes = [
         o
         for o in objs
-        if o.fixed and o.hollow and any(r.verb == "action_1" for r in o.behavior)
+        if o.fixed
+        and o.hollow
+        and o.state.get("lid") in {"open", "closed"}
+        and {r.verb for r in o.behavior} >= {"grab", "separate", "speak", "insert"}
+        and not any(r.verb.startswith("action_") for r in o.behavior)
     ]
     assert len(mailboxes) == 1
 

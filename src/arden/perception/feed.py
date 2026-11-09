@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from arden.config import PerceptionSettings, Settings, load_config
 from arden.environment.daynight import coarse_light_level
 from arden.llm.schemas import VERBS
+from arden.mailbox import is_inside_closed_container
 from arden.world.objects import Composite, PERCEPTIBLE_STATE_KEYS, Position, WorldObject
 from arden.world.physics import _get_active_world, _set_active_world
 from arden.world.world import AgentBody, World, WorldEvent
@@ -160,8 +161,12 @@ def _extract_object_affordances(
 
         if explicit_opaque is not None:
             _add(explicit_opaque)
-        elif _OPAQUE_ACTION.fullmatch(verb) or verb in _BODY_VERBS:
+        elif _OPAQUE_ACTION.fullmatch(verb):
             _add(verb)
+        elif verb in _BODY_VERBS:
+            # Physical body affordances are derived from perceptible properties above;
+            # hidden behavior rules on standard body verbs never add extra affordances.
+            continue
         else:
             # Non-physical verb with no physical analogue: expose only as action_<n>
             reg_key = (obj.id, verb)
@@ -236,6 +241,18 @@ class PerceivedObject(BaseModel):
         """Single-element list containing this object percept."""
         return [self]
 
+    @property
+    def lid(self) -> str | None:
+        """Perceptible lid state (``'open'`` or ``'closed'``), if present."""
+        val = self.state.get("lid")
+        return str(val) if isinstance(val, str) else None
+
+    @property
+    def text(self) -> str | None:
+        """Perceptible written text revealed by ``look``, if present."""
+        val = self.state.get("text")
+        return str(val) if isinstance(val, str) else None
+
     @model_serializer(mode="wrap")
     def _serialize_model(self, handler: Any) -> dict[str, Any]:
         data: dict[str, Any] = handler(self)
@@ -296,6 +313,10 @@ class PerceivedObject(BaseModel):
         return " ".join(parts)
 
     def __getitem__(self, key: str) -> Any:
+        if key == "text" and "text" in self.state:
+            return self.state["text"]
+        if key == "lid" and "lid" in self.state:
+            return self.state["lid"]
         d = self.to_dict()
         if key in d:
             return d[key]
@@ -595,11 +616,16 @@ def _build_perceived_object(
     *,
     keep_color: bool,
     affordances: list[str] | None = None,
+    reveal_text: bool = False,
 ) -> PerceivedObject:
     """Build a ``PerceivedObject`` from ``obj`` relative to ``body``."""
     raw_props = obj.perceptible()
     if not keep_color:
         raw_props.pop("color", None)
+    if not reveal_text and isinstance(raw_props.get("state"), dict):
+        raw_props["state"].pop("text", None)
+    elif reveal_text and isinstance(raw_props.get("state"), dict) and "text" in raw_props["state"]:
+        raw_props["text"] = raw_props["state"]["text"]
     color_val = raw_props.get("color")
 
     dist = round(
@@ -670,6 +696,8 @@ def _sanitize_world_event(
         return None
 
     current_obj = world.objects.get(obj_id)
+    if current_obj is not None and is_inside_closed_container(world, current_obj):
+        return None
     if pos is None and current_obj is not None:
         pos = current_obj.position.model_copy()
 
@@ -710,7 +738,9 @@ def _sanitize_world_event(
                 continue
             if k == "state" and isinstance(v, Mapping):
                 allowed_state = {
-                    sk: sv for sk, sv in v.items() if sk in PERCEPTIBLE_STATE_KEYS
+                    sk: sv
+                    for sk, sv in v.items()
+                    if sk in PERCEPTIBLE_STATE_KEYS and sk != "text"
                 }
                 if v and not allowed_state:
                     continue
@@ -797,6 +827,8 @@ def perceive(
     if vf > 0.0:
         for obj_id in sorted(world.objects, key=_object_sort_key):
             obj = world.objects[obj_id]
+            if is_inside_closed_container(world, obj):
+                continue
             dist = math.hypot(
                 obj.position.x - agent_body.position.x,
                 obj.position.y - agent_body.position.y,
@@ -927,11 +959,13 @@ def look(
         agent_body = AgentBody(position=obj.position.model_copy())
 
     obj_affordances = _extract_object_affordances(obj, agent_body)
+    inside_closed = resolved_world is not None and is_inside_closed_container(resolved_world, obj)
     return _build_perceived_object(
         obj,
         agent_body,
         keep_color=True,
-        affordances=obj_affordances,
+        affordances=[] if inside_closed else obj_affordances,
+        reveal_text=not inside_closed,
     )
 
 

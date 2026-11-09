@@ -50,7 +50,7 @@ The project is called Arden, after the forest in Shakespeare's *As You Like It*,
 | Object knowledge | Objects expose perceptible properties, not semantic names. The agent names things itself. |
 | Actions | A fixed set of body-level verbs. Objects decide which verbs do something and what happens. |
 | Parameters | Physical parameters with known ranges are exposed; their effects must be learned. |
-| Novel affordances | Things with no physical analogue (the mailbox) appear as opaque actions with no explanation. |
+| Novel affordances | Things with no physical analogue appear as opaque actions with no explanation; the mailbox uses ordinary body verbs (`grab`, `separate`, `speak`, `insert`) and a perceptible lid (`open`/`closed`). |
 | Memory | Capped short-term buffer that forces reflection into episodic and semantic tiers. |
 | Attention | A cheap gate decides when the LLM thinks, never what the agent does. It errs toward waking the LLM. |
 | World model | A small learned predictor whose prediction error is the surprise signal, used for both gating and curiosity. No planning at first. |
@@ -170,7 +170,7 @@ Perception is a compact structured text feed, sent as deltas since the last upda
 | separate | target | Takes a composite apart again |
 | speak | free text | Vocalizing; nobody may be listening |
 
-Opaque actions are added to the menu only when the agent is near the object that provides them, with no name, description, or hint.
+Opaque actions are added to the menu only when the agent is near the object that provides them, with no name, description, or hint. Objects like the mailbox need no opaque action: their hidden behavior rules respond directly to existing body verbs (`grab`, `separate`, `speak`, `insert`).
 
 ## 7. Building
 
@@ -234,7 +234,7 @@ The first run is a small natural clearing: a meadow with a few trees, a stream a
 | Curiosity | Ball | Round, light, rolls | Play, early cause and effect |
 | Curiosity | Hollow log | Hollow, heavy | A container and a small shelter |
 | Curiosity | Berry bush | Berries are small and fragile | Optional food; restores a little energy |
-| Opaque | Mailbox | Unexplained action when nearby | Contact with the creator |
+| Curiosity | Mailbox | Hollow, fixed, has a lid (`open`/`closed`) | Contact with the creator via speaking or inserting objects while open |
 
 - Every material property is covered: rigid, binding, hollow, heavy, light, round, fragile, and wet.
 - Stacking, binding, and inserting are all possible from the start, so a shelter, a bridge, or a long tool can emerge without being designed.
@@ -366,15 +366,16 @@ Retrieval is by relevance rather than loading everything: when the agent meets a
 
 ## 12. Creator interface and the mailbox
 
-The mailbox is a physical object in the world. Near it, the agent gains an opaque action that accepts free text. It is never told what it does or who receives it. Messages reach the creator console, and the creator can reply, spawn an object in response, or stay silent.
+The mailbox is an ordinary physical object in the world with a perceptible lid (`open` or `closed`). It has no special or opaque action, no mailbox-specific novelty flag, and no names or descriptions; its hidden behavior rules respond to existing body verbs (`grab`, `separate`, `speak`, `insert`). `grab` or `separate` on the mailbox toggles its lid, and while closed its contents are neither perceptible nor reachable. Speaking while within reach of an open mailbox captures the spoken text as an outgoing message (delivered when the lid closes or after a configurable delay, default `10 s` sim time), and inserting a held object into the open mailbox removes and preserves it for delivery alongside any speech captured in the same window. Delivered messages and objects go to a persistent creator inbox with world tick and real timestamp, with nothing shown to the agent to acknowledge delivery. The creator can reply, spawn an object in response, or stay silent.
 
 > Creator stance: respond at will, sometimes not at all, with no acknowledgement required. Avoid giving away semantics, such as names for objects or explanations of how things work. This part is deliberately experimental.
 
-- Responses can be indirect: spawning a requested tool with no note, or a vague letter, rather than a clear answer.
-- Every creator action is logged with a timestamp, so changes in the agent's beliefs about the mailbox can be traced back to what the creator did.
-- It may be worth keeping private creator notes for each experiment, since different response styles are effectively different experiments.
+- Replies (`reply(text)`) place a flat letter object inside the mailbox whose `text` is a perceptible property revealed only via `look` with the lid open.
+- Indirect responses (`spawn_in_response(props)`) place an object inside the mailbox with no note (or return a preserved object the agent previously sent), while silence is the default.
+- Arrivals in the mailbox emit a creator event so the attention gate can wake the agent.
+- An optional `mailbox.lid_drift_chance` setting (per in-game hour, default `0`) lets a closed lid occasionally swing open on its own as a gentle nudge.
+- Every send, delivery, and creator action is logged with world tick, real timestamp, and an optional private creator note per experiment, so changes in the agent's beliefs about the mailbox can be traced back to what the creator did.
 - Creator tools: spawn, despawn, and move objects; read and answer mail; set or schedule weather and toggle its automation; set or freeze the time of day; pause and fast-forward time.
-- Replies could arrive as a physical letter in the mailbox, itself an object to discover.
 
 ## 13. Observability
 

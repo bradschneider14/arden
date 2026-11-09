@@ -50,6 +50,19 @@ from arden.world.objects import (
     object_radius,
     validate_world_object,
 )
+from arden.mailbox import (
+    CreatorInbox,
+    InboxEntry,
+    MailboxConfig,
+    MailboxLogEntry,
+    MailboxManager,
+    MailboxSettings,
+    has_lid,
+    is_inside_closed_container,
+    is_mailbox_object,
+    reply,
+    spawn_in_response,
+)
 
 from arden.world.physics import (
     COLLISION_ITERATIONS,
@@ -465,8 +478,10 @@ class MailArrivedEvent(WorldEvent):
 
     type: Literal["mail_arrived"] = "mail_arrived"
     source: str = "creator"
+    mailbox_id: str | None = None
     text: str | None = None
     object_id: str | None = None
+    arrival_kind: str | None = None
 
 
 class WakeEvent(WorldEvent):
@@ -693,6 +708,10 @@ class World:
         body_config: BodyConfig | Mapping[str, Any] | str | None = None,
         preset: str | None = None,
         drives: DriveState | Mapping[str, Any] | None = None,
+        mailbox: MailboxManager | MailboxConfig | Mapping[str, Any] | None = None,
+        inbox: CreatorInbox | None = None,
+        db_path: Any = None,
+        creator_note: str | None = None,
     ) -> None:
         if isinstance(rng, random.Random):
             if seed is not None:
@@ -818,6 +837,24 @@ class World:
                     raise TypeError("objects must contain WorldObject instances or mappings")
                 self.objects[created.id] = created
 
+        if isinstance(mailbox, MailboxManager):
+            self._mailbox_manager: MailboxManager = mailbox
+            self._mailbox_manager.world = self
+            if inbox is not None:
+                self._mailbox_manager.inbox = inbox
+            if creator_note is not None:
+                self._mailbox_manager.creator_note = creator_note
+        else:
+            self._mailbox_manager = MailboxManager(
+                self,
+                config=mailbox,
+                inbox=inbox,
+                db_path=db_path,
+                creator_note=creator_note,
+                seed=default_w_seed,
+            )
+        self._custom_mailbox: Any = None
+
         _set_active_world(self)
 
     def _record_perception_event(self, event: WorldEvent) -> None:
@@ -833,6 +870,10 @@ class World:
             return
         if event.type == "object_spawned" and not self._has_been_perceived:
             return
+        if event.object_id is not None:
+            obj = self.objects.get(event.object_id)
+            if obj is not None and is_inside_closed_container(self, obj):
+                return
         self._perception_event_log.append(event)
 
     @property
@@ -844,6 +885,97 @@ class World:
     def event_bus(self) -> EventBus:
         """Alias for ``events``."""
         return self.events
+
+    @property
+    def mailbox(self) -> Any:
+        """Return the ``MailboxManager`` (or a custom mailbox object if overridden)."""
+        if self._custom_mailbox is not None:
+            return self._custom_mailbox
+        return self._mailbox_manager
+
+    @mailbox.setter
+    def mailbox(self, value: Any) -> None:
+        if isinstance(value, MailboxManager):
+            self._mailbox_manager = value
+            self._mailbox_manager.world = self
+            self._custom_mailbox = None
+        else:
+            self._custom_mailbox = value
+
+    @property
+    def inbox(self) -> CreatorInbox:
+        """Persistent SQLite creator inbox receiving messages and objects from the mailbox."""
+        return self._mailbox_manager.inbox
+
+    @property
+    def creator_inbox(self) -> CreatorInbox:
+        """Alias for ``inbox``."""
+        return self._mailbox_manager.inbox
+
+    @property
+    def mailbox_logs(self) -> list[MailboxLogEntry]:
+        """Audit log entries for all mailbox sends, deliveries, and creator actions."""
+        return self._mailbox_manager.inbox.logs()
+
+    @property
+    def creator_note(self) -> str | None:
+        """Private creator note attached to this world/experiment."""
+        return self._mailbox_manager.creator_note
+
+    @creator_note.setter
+    def creator_note(self, value: str | None) -> None:
+        self._mailbox_manager.creator_note = value
+
+    def set_creator_note(self, note: str | None) -> None:
+        """Set or update the private experiment creator note and log the change."""
+        self._mailbox_manager.set_creator_note(note)
+
+    def reply(
+        self,
+        text: str,
+        *,
+        mailbox_id: str | WorldObject | None = None,
+        color: str | None = "white",
+        note: str | None = None,
+    ) -> WorldObject:
+        """Place a flat letter object with perceptible ``text`` inside the mailbox."""
+        _set_active_world(self)
+        return self._mailbox_manager.reply(
+            text,
+            mailbox_id=mailbox_id,
+            color=color,
+            note=note,
+        )
+
+    def spawn_in_response(
+        self,
+        props: Mapping[str, Any] | WorldObject,
+        *,
+        mailbox_id: str | WorldObject | None = None,
+        note: str | None = None,
+    ) -> WorldObject:
+        """Place an object inside the mailbox with no note in response to the agent."""
+        _set_active_world(self)
+        return self._mailbox_manager.spawn_in_response(
+            props,
+            mailbox_id=mailbox_id,
+            note=note,
+        )
+
+    def return_object(
+        self,
+        object_or_entry: Any,
+        *,
+        mailbox_id: str | WorldObject | None = None,
+        note: str | None = None,
+    ) -> WorldObject:
+        """Return a preserved object from the creator inbox back into the mailbox."""
+        _set_active_world(self)
+        return self._mailbox_manager.return_object(
+            object_or_entry,
+            mailbox_id=mailbox_id,
+            note=note,
+        )
 
     def get_pull(self, object_id: str) -> float:
         """Return the persistent unexplained-surprise pull stored on ``object_id``."""
@@ -1292,6 +1424,14 @@ class World:
     ) -> None:
         """Remove an event subscriber from the world's event bus."""
         self.events.unsubscribe(handler, event_type=event_type)
+
+    def get_object(self, object_id: str) -> WorldObject:
+        """Return the ``WorldObject`` with id ``object_id``, raising ``KeyError`` if absent."""
+        return self.objects[object_id]
+
+    def clear_events(self) -> None:
+        """Clear buffered perception events on this world."""
+        self._perception_event_log.clear()
 
     def spawn(
         self,
@@ -2613,6 +2753,7 @@ class World:
             surprise=surprise,
         )
         self.weather.end_tick(self.tick)
+        self._mailbox_manager.step()
         self.events.emit(TickEvent(tick=self.tick, source="world"))
         return self.tick
 
@@ -2630,6 +2771,7 @@ class World:
             "daynight": self.daynight.to_dict(),
             "body_state": self._body_state_system.to_dict(),
             "weather": self.weather.to_dict(),
+            "mailbox": self._mailbox_manager.to_dict(),
             "factory": {
                 "next": self._factory._next,
                 "used": sorted(self._factory._used),
@@ -2722,6 +2864,10 @@ class World:
 
         self.weather = weather
         self.weather._bind_world(self)
+
+        raw_mailbox = raw.get("mailbox")
+        if isinstance(raw_mailbox, Mapping):
+            self._mailbox_manager.load_dict(raw_mailbox)
 
         self._factory = factory
         _set_active_world(self)

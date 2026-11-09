@@ -44,7 +44,10 @@ _PERCEPTIBLE_FIELDS = frozenset(
 # entries never leak to the agent through `perceptible()`.
 PERCEPTIBLE_STATE_KEYS: frozenset[str] = frozenset(
     {
-        "wet", "made_by_agent",
+        "wet",
+        "made_by_agent",
+        "lid",
+        "text",
     }
 )
 _PERCEPTIBLE_STATE_KEYS = PERCEPTIBLE_STATE_KEYS
@@ -334,6 +337,18 @@ class WorldObject(BaseModel):
     def made_by_agent(self) -> bool:
         """True if this object was built/assembled by the agent."""
         return bool(self.state.get("made_by_agent", False))
+
+    @property
+    def lid(self) -> str | None:
+        """Perceptible lid state (``'open'`` or ``'closed'``), or ``None`` if no lid."""
+        val = self.state.get("lid")
+        return str(val) if isinstance(val, str) else None
+
+    @property
+    def text(self) -> str | None:
+        """Perceptible written text on this object (e.g. a reply letter), or ``None``."""
+        val = self.state.get("text")
+        return str(val) if isinstance(val, str) else None
 
     @property
     def x(self) -> float:
