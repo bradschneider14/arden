@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import secrets
 import threading
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -17,7 +18,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from arden import __version__
 from arden.agent.gate import Gate, GateDecisionEvent
@@ -230,9 +231,241 @@ def _is_spectator_request(request: Request) -> bool:
     return False
 
 
+FIRST_RUN_PRESETS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "ball",
+        "label": "Ball (red sphere)",
+        "category": "curiosity",
+        "props": {
+            "creator_label": "ball",
+            "shape": "sphere",
+            "height": 0.25,
+            "volume": 0.008,
+            "weight": 0.25,
+            "rigidity": 0.5,
+            "binding": False,
+            "hollow": False,
+            "fragile": False,
+            "color": "red",
+            "fixed": False,
+            "behavior": [
+                {"verb": "push", "scale": 4},
+                {"verb": "strike", "response": "bounce"},
+            ],
+        },
+    },
+    {
+        "key": "stick",
+        "label": "Stick (long rigid)",
+        "category": "material",
+        "props": {
+            "creator_label": "stick",
+            "shape": "long",
+            "height": 0.85,
+            "volume": 0.006,
+            "weight": 0.3,
+            "rigidity": 0.88,
+            "binding": False,
+            "hollow": False,
+            "fragile": False,
+            "color": "brown",
+            "fixed": False,
+        },
+    },
+    {
+        "key": "flat_stone",
+        "label": "Flat Stone (heavy stackable)",
+        "category": "material",
+        "props": {
+            "creator_label": "flat stone",
+            "shape": "flat",
+            "height": 0.28,
+            "volume": 0.045,
+            "weight": 2.6,
+            "rigidity": 0.95,
+            "binding": False,
+            "hollow": False,
+            "fragile": False,
+            "color": "gray",
+            "fixed": False,
+        },
+    },
+    {
+        "key": "vine",
+        "label": "Vine (binding)",
+        "category": "material",
+        "props": {
+            "creator_label": "vine",
+            "shape": "long",
+            "height": 1.2,
+            "volume": 0.003,
+            "weight": 0.15,
+            "rigidity": 0.2,
+            "binding": True,
+            "hollow": False,
+            "fragile": False,
+            "color": "green",
+            "fixed": False,
+        },
+    },
+    {
+        "key": "leaf",
+        "label": "Leaf (very light)",
+        "category": "material",
+        "props": {
+            "creator_label": "leaf",
+            "shape": "flat",
+            "height": 0.02,
+            "volume": 0.0004,
+            "weight": 0.05,
+            "rigidity": 0.15,
+            "binding": False,
+            "hollow": False,
+            "fragile": False,
+            "color": "green",
+            "fixed": False,
+        },
+    },
+    {
+        "key": "berry",
+        "label": "Berry (small fragile edible)",
+        "category": "curiosity",
+        "props": {
+            "creator_label": "berry",
+            "shape": "sphere",
+            "height": 0.08,
+            "volume": 0.0003,
+            "weight": 0.02,
+            "rigidity": 0.2,
+            "binding": False,
+            "hollow": False,
+            "fragile": True,
+            "color": "red",
+            "fixed": False,
+            "behavior": [
+                {"verb": "edible", "energy": 0.15},
+                {"verb": "strike", "response": "break", "above_force": 0.2},
+            ],
+        },
+    },
+    {
+        "key": "berry_bush",
+        "label": "Berry Bush (fixed bush)",
+        "category": "curiosity",
+        "props": {
+            "creator_label": "berry bush",
+            "shape": "sphere",
+            "height": 0.9,
+            "volume": 0.35,
+            "weight": 8.0,
+            "rigidity": 0.4,
+            "binding": False,
+            "hollow": False,
+            "fragile": True,
+            "color": "green",
+            "fixed": True,
+            "state": {"berries": 3},
+            "behavior": [
+                {"verb": "edible", "restore_energy": 0.15},
+                {"verb": "strike", "response": "break", "above_force": 0.85},
+            ],
+        },
+    },
+    {
+        "key": "hollow_log",
+        "label": "Hollow Log (container/shelter)",
+        "category": "curiosity",
+        "props": {
+            "creator_label": "hollow log",
+            "shape": "cylinder",
+            "height": 0.55,
+            "volume": 0.18,
+            "weight": 8.0,
+            "rigidity": 0.9,
+            "binding": False,
+            "hollow": True,
+            "fragile": False,
+            "color": "brown",
+            "fixed": False,
+        },
+    },
+    {
+        "key": "large_tree",
+        "label": "Large Tree (tall fixed shade)",
+        "category": "terrain",
+        "props": {
+            "creator_label": "large tree",
+            "shape": "cylinder",
+            "height": 3.5,
+            "volume": 0.8,
+            "weight": 200.0,
+            "rigidity": 0.98,
+            "binding": False,
+            "hollow": False,
+            "fragile": False,
+            "color": "brown",
+            "fixed": True,
+        },
+    },
+    {
+        "key": "mailbox",
+        "label": "Mailbox (lidded container)",
+        "category": "curiosity",
+        "props": {
+            "creator_label": "mailbox",
+            "shape": "cube",
+            "height": 1.1,
+            "volume": 0.12,
+            "weight": 15.0,
+            "rigidity": 0.95,
+            "binding": False,
+            "hollow": True,
+            "fragile": False,
+            "color": "blue",
+            "fixed": True,
+            "state": {"lid": "closed"},
+            "behavior": [
+                {"verb": "grab", "response": "toggle_lid"},
+                {"verb": "separate", "response": "toggle_lid"},
+                {"verb": "speak", "response": "capture_mail"},
+                {"verb": "insert", "response": "send_object"},
+            ],
+        },
+    },
+)
+
+FIRST_RUN_PRESETS = tuple(
+    {**item["props"], **item} for item in FIRST_RUN_PRESETS
+)
+
+_PRESET_LOOKUP: dict[str, dict[str, Any]] = {}
+for _p in FIRST_RUN_PRESETS:
+    _k = str(_p["key"]).lower()
+    _PRESET_LOOKUP[_k] = _p["props"]
+    _PRESET_LOOKUP[_k.replace("_", " ")] = _p["props"]
+    _PRESET_LOOKUP[_k.replace("_", "-")] = _p["props"]
+_PRESET_LOOKUP["stone"] = _PRESET_LOOKUP["flat_stone"]
+_PRESET_LOOKUP["tree"] = _PRESET_LOOKUP["large_tree"]
+_PRESET_LOOKUP["log"] = _PRESET_LOOKUP["hollow_log"]
+_PRESET_LOOKUP["bush"] = _PRESET_LOOKUP["berry_bush"]
+
+
+def get_spawn_presets() -> list[dict[str, Any]]:
+    """Return the first-run object property presets list for creator spawning."""
+    return json.loads(json.dumps(list(FIRST_RUN_PRESETS)))
+
+
 def _ensure_spawn_defaults(props: Mapping[str, Any]) -> dict[str, Any]:
-    """Ensure minimal object spawn payloads have valid physical defaults."""
-    data = dict(props)
+    """Ensure minimal object spawn payloads (or preset references) have valid physical defaults."""
+    raw = dict(props)
+    preset_name = raw.pop("preset", None)
+    data: dict[str, Any] = {}
+    if isinstance(preset_name, str) and preset_name.strip():
+        key = preset_name.strip().lower()
+        if key not in _PRESET_LOOKUP:
+            raise ValueError(f"Unknown spawn preset: {preset_name!r}")
+        data.update(json.loads(json.dumps(_PRESET_LOOKUP[key])))
+    data.update(raw)
     if "shape" not in data:
         data["shape"] = "sphere"
     if "level" not in data:
@@ -264,6 +497,433 @@ def _ensure_spawn_defaults(props: Mapping[str, Any]) -> dict[str, Any]:
         data.pop("y", None)
         data.pop("pos", None)
     return data
+
+
+_OBJ_ID_PATTERN = re.compile(r"\b(object_[0-9]+)\b", re.IGNORECASE)
+_WORD_TOKEN_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{1,24}")
+
+_EXPLICIT_NAME_PATTERNS: tuple[tuple[re.Pattern[str], int, int], ...] = (
+    # "call object_7 the red ball" / "called object_7 'bouncer'"
+    (
+        re.compile(
+            r"\b(?:call(?:ing|ed|s)?|name(?:d|s|ing)?|dub(?:bed|bing|s)?)\s+"
+            r"(object_[0-9]+)\s+(?:the\s+|a\s+|an\s+|as\s+)?[\"']?"
+            r"([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?)[\"']?",
+            re.IGNORECASE,
+        ),
+        1,
+        2,
+    ),
+    # "object_7 is called the red ball" / "object_7 is a red ball" / "object_7: red ball"
+    (
+        re.compile(
+            r"\b(object_[0-9]+)\s+(?:is\s+called|is\s+named|called|named|is\s+a|is\s+an|is\s+the|=|:)\s+"
+            r"(?:the\s+|a\s+|an\s+)?[\"']?"
+            r"([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?)[\"']?",
+            re.IGNORECASE,
+        ),
+        1,
+        2,
+    ),
+    # "object_7 (red ball)"
+    (
+        re.compile(
+            r"\b(object_[0-9]+)\s*\(\s*[\"']?"
+            r"([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?)[\"']?\s*\)",
+            re.IGNORECASE,
+        ),
+        1,
+        2,
+    ),
+    # "the red ball (object_7)"
+    (
+        re.compile(
+            r"\b(?:the\s+|a\s+|an\s+)?[\"']?"
+            r"([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?)[\"']?\s*\(\s*(object_[0-9]+)\s*\)",
+            re.IGNORECASE,
+        ),
+        2,
+        1,
+    ),
+)
+
+_NAME_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the", "and", "for", "with", "from", "into", "onto", "upon", "over", "under",
+        "near", "next", "beside", "toward", "towards", "away", "around", "through",
+        "across", "along", "about", "between", "within", "without", "inside", "outside",
+        "that", "this", "these", "those", "which", "what", "where", "when", "while",
+        "after", "before", "because", "since", "until", "though", "although", "whether",
+        "there", "here", "then", "than", "very", "much", "more", "most", "less", "least",
+        "some", "many", "each", "every", "other", "another", "such", "same", "only",
+        "just", "also", "even", "still", "already", "again", "back", "down",
+        "will", "would", "could", "should", "might", "must", "shall", "may", "can",
+        "cannot", "have", "has", "had", "having", "been", "being", "were", "was", "are",
+        "is", "not", "nor", "but", "yet", "both", "either", "neither", "its", "their",
+        "his", "her", "our", "your", "my", "me", "we", "us", "you", "they", "them",
+        "it", "he", "she", "who", "whom", "whose",
+        "move", "moved", "moving", "moves", "look", "looked", "looking", "looks",
+        "push", "pushed", "pushing", "pushes", "strike", "struck", "striking", "strikes",
+        "grab", "grabbed", "grabbing", "grabs", "drop", "dropped", "dropping", "drops",
+        "place", "placed", "placing", "places", "stack", "stacked", "stacking", "stacks",
+        "bind", "bound", "binding", "binds", "insert", "inserted", "inserting", "inserts",
+        "separate", "separated", "separating", "separates", "speak", "spoke", "speaking",
+        "speaks", "rest", "resting", "rested", "walk", "walked", "walking", "reach",
+        "reached", "reaching", "reachable", "test", "testing", "tested", "try", "trying",
+        "tried", "explore", "exploring", "explored", "inspect", "inspecting", "inspected",
+        "examine", "examining", "examined", "approach", "approaching", "approached",
+        "check", "checking", "checked", "observe", "observing", "observed", "see", "saw",
+        "seen", "find", "found", "make", "made", "making", "take", "took", "taken",
+        "give", "gave", "keep", "kept", "need", "needs", "needed", "want", "wants",
+        "wanted", "seem", "seems", "seemed", "appear", "appears", "appeared",
+        "object", "objects", "thing", "things", "item", "items", "target", "targets",
+        "agent", "self", "world", "ground", "raised", "level", "position", "distance",
+        "meter", "meters", "tick", "ticks", "force", "speed", "energy", "comfort",
+        "north", "south", "east", "west", "left", "right", "top", "bottom", "side",
+        "far", "close", "closer", "further", "farther", "high", "low", "new", "old",
+        "first", "last", "next", "previous", "current", "active", "idle", "none", "null",
+        "true", "false", "yes",
+    }
+)
+
+
+def _clean_extracted_phrase(phrase: str) -> str | None:
+    """Clean and filter a candidate extracted name or word phrase."""
+    tokens = [
+        t.lower()
+        for t in _WORD_TOKEN_PATTERN.findall(phrase)
+        if not _OBJ_ID_PATTERN.fullmatch(t)
+    ]
+    filtered = [t for t in tokens if t not in _NAME_STOPWORDS and len(t) >= 2]
+    if not filtered:
+        return None
+    return " ".join(filtered[:3])
+
+
+def extract_object_names(
+    *,
+    speeches: Sequence[Any] = (),
+    thoughts: Sequence[Any] = (),
+    beliefs: Sequence[Any] = (),
+    episodes: Sequence[Any] = (),
+    world: World | None = None,
+) -> dict[str, Any]:
+    """Extract words and names the agent uses for objects from ``speak``, thoughts, and beliefs."""
+    # Map object_id -> list of {"word": str, "source": str, "tick": int, "text": str, "explicit": bool}
+    records_by_obj: dict[str, list[dict[str, Any]]] = {}
+
+    def _add_record(
+        obj_id: str,
+        word: str | None,
+        source: str,
+        tick: int,
+        raw_text: str,
+        *,
+        explicit: bool = False,
+    ) -> None:
+        if not word:
+            return
+        cleaned = _clean_extracted_phrase(word)
+        if not cleaned:
+            return
+        norm_id = obj_id.strip().lower()
+        if not _OBJ_ID_PATTERN.fullmatch(norm_id):
+            return
+        bucket = records_by_obj.setdefault(norm_id, [])
+        bucket.append(
+            {
+                "word": cleaned,
+                "source": source,
+                "tick": int(tick),
+                "text": str(raw_text).strip(),
+                "explicit": explicit,
+            }
+        )
+        # If it is a multi-word phrase (e.g. "red ball"), also record individual salient words
+        parts = cleaned.split()
+        if len(parts) > 1:
+            for part in parts:
+                if len(part) >= 3 and part not in _NAME_STOPWORDS:
+                    bucket.append(
+                        {
+                            "word": part,
+                            "source": source,
+                            "tick": int(tick),
+                            "text": str(raw_text).strip(),
+                            "explicit": False,
+                        }
+                    )
+
+    def _process_text(
+        text: str,
+        source: str,
+        tick: int = 0,
+        context_obj_ids: Sequence[str] = (),
+    ) -> None:
+        if not text or not isinstance(text, str):
+            return
+        stripped = text.strip()
+        if not stripped:
+            return
+
+        # 1. Explicit naming patterns
+        for pat, id_group, phrase_group in _EXPLICIT_NAME_PATTERNS:
+            for m in pat.finditer(stripped):
+                oid = m.group(id_group).lower()
+                phrase = m.group(phrase_group)
+                _add_record(oid, phrase, source, tick, stripped, explicit=True)
+
+        # 2. Check all object_<n> mentions in the text
+        mentions = list(_OBJ_ID_PATTERN.finditer(stripped))
+        if mentions:
+            # Partition text around each object_<n> mention so words associate with the nearest object_<n>
+            for idx, match in enumerate(mentions):
+                oid = match.group(1).lower()
+                start_bound = mentions[idx - 1].end() if idx > 0 else 0
+                end_bound = mentions[idx + 1].start() if idx + 1 < len(mentions) else len(stripped)
+
+                before_segment = stripped[start_bound:match.start()]
+                after_segment = stripped[match.end():end_bound]
+
+                # Preceding modifier phrase right before object_<n>, e.g. "the red ball object_7"
+                before_words = [
+                    w.lower()
+                    for w in _WORD_TOKEN_PATTERN.findall(before_segment)
+                    if not _OBJ_ID_PATTERN.fullmatch(w) and w.lower() not in _NAME_STOPWORDS
+                ]
+                if before_words:
+                    tail = before_words[-2:]
+                    if len(tail) == 2:
+                        _add_record(oid, " ".join(tail), source, tick, stripped, explicit=True)
+                    for w in tail:
+                        _add_record(oid, w, source, tick, stripped, explicit=False)
+
+                # Following descriptive words in the same clause after object_<n>
+                clause_after = re.split(r"[.;!?]|,\s*(?:and|but|so|then)\b", after_segment)[0]
+                after_words = [
+                    w.lower()
+                    for w in _WORD_TOKEN_PATTERN.findall(clause_after)
+                    if not _OBJ_ID_PATTERN.fullmatch(w) and w.lower() not in _NAME_STOPWORDS
+                ]
+                for w in after_words[:4]:
+                    _add_record(oid, w, source, tick, stripped, explicit=False)
+        elif context_obj_ids:
+            # No literal object_<n> in the text (common in `speak`), use context object IDs
+            words = [
+                w.lower()
+                for w in _WORD_TOKEN_PATTERN.findall(stripped)
+                if not _OBJ_ID_PATTERN.fullmatch(w) and w.lower() not in _NAME_STOPWORDS
+            ]
+            for oid in context_obj_ids:
+                if 1 <= len(words) <= 3:
+                    _add_record(oid, " ".join(words), source, tick, stripped, explicit=True)
+                for w in words[:4]:
+                    _add_record(oid, w, source, tick, stripped, explicit=False)
+
+    # 1. Process speeches (`speak`)
+    for item in speeches:
+        if isinstance(item, str):
+            _process_text(item, "speak", 0)
+        elif isinstance(item, Mapping):
+            txt = item.get("text") or item.get("speech") or item.get("message")
+            t = int(item.get("tick", 0) or 0)
+            ctx: list[str] = []
+            for key in ("object_id", "target", "holding"):
+                val = item.get(key)
+                if isinstance(val, str) and _OBJ_ID_PATTERN.fullmatch(val):
+                    ctx.append(val.lower())
+            for key in ("context_objects", "targets", "objects"):
+                vals = item.get(key)
+                if isinstance(vals, Sequence) and not isinstance(vals, str | bytes):
+                    for v in vals:
+                        if isinstance(v, str) and _OBJ_ID_PATTERN.fullmatch(v):
+                            ctx.append(v.lower())
+            if isinstance(txt, str):
+                _process_text(txt, "speak", t, ctx)
+        else:
+            txt = getattr(item, "text", None)
+            t = int(getattr(item, "tick", 0) or 0)
+            ctx_ids: list[str] = []
+            for attr in ("object_id", "target", "mailbox_id"):
+                val = getattr(item, attr, None)
+                if isinstance(val, str) and _OBJ_ID_PATTERN.fullmatch(val):
+                    ctx_ids.append(val.lower())
+            if isinstance(txt, str):
+                _process_text(txt, "speak", t, ctx_ids)
+
+    # 2. Process thoughts (and intent goals/expectations)
+    for item in thoughts:
+        if isinstance(item, str):
+            _process_text(item, "thought", 0)
+        elif isinstance(item, Mapping):
+            t = int(item.get("tick", 0) or 0)
+            step_targets: list[str] = []
+            for s in item.get("steps") or ():
+                st = s.get("target") if isinstance(s, Mapping) else getattr(s, "target", None)
+                if isinstance(st, str) and _OBJ_ID_PATTERN.fullmatch(st):
+                    step_targets.append(st.lower())
+            for field_name in ("thought", "text", "goal", "expect"):
+                val = item.get(field_name)
+                if isinstance(val, str) and val.strip():
+                    _process_text(val, "thought", t, step_targets)
+        else:
+            t = int(getattr(item, "tick", 0) or 0)
+            step_targets = []
+            for s in getattr(item, "steps", ()) or ():
+                st = s.get("target") if isinstance(s, Mapping) else getattr(s, "target", None)
+                if isinstance(st, str) and _OBJ_ID_PATTERN.fullmatch(st):
+                    step_targets.append(st.lower())
+            for attr_name in ("thought", "goal", "expect"):
+                val = getattr(item, attr_name, None)
+                if isinstance(val, str) and val.strip():
+                    _process_text(val, "thought", t, step_targets)
+
+    # 3. Process beliefs (and tags)
+    for item in beliefs:
+        if isinstance(item, str):
+            _process_text(item, "belief", 0)
+        elif isinstance(item, Mapping):
+            stmt = item.get("statement") or item.get("text") or ""
+            tags = list(item.get("tags") or ())
+            t = int(item.get("updated_tick", item.get("tick", 0)) or 0)
+            tag_objs = [
+                str(tg).lower()
+                for tg in tags
+                if isinstance(tg, str) and _OBJ_ID_PATTERN.fullmatch(tg.strip())
+            ]
+            stmt_objs = [m.lower() for m in _OBJ_ID_PATTERN.findall(str(stmt))]
+            all_objs = list(dict.fromkeys([*tag_objs, *stmt_objs]))
+            if isinstance(stmt, str) and stmt.strip():
+                _process_text(stmt, "belief", t, all_objs)
+            for tg in tags:
+                if isinstance(tg, str) and not _OBJ_ID_PATTERN.fullmatch(tg.strip()):
+                    for oid in all_objs:
+                        _add_record(oid, tg, "belief", t, str(stmt or tg), explicit=False)
+        else:
+            stmt = getattr(item, "statement", "") or ""
+            tags = list(getattr(item, "tags", ()) or ())
+            t = int(getattr(item, "updated_tick", getattr(item, "created_tick", 0)) or 0)
+            tag_objs = [
+                str(tg).lower()
+                for tg in tags
+                if isinstance(tg, str) and _OBJ_ID_PATTERN.fullmatch(tg.strip())
+            ]
+            stmt_objs = [m.lower() for m in _OBJ_ID_PATTERN.findall(str(stmt))]
+            all_objs = list(dict.fromkeys([*tag_objs, *stmt_objs]))
+            if isinstance(stmt, str) and stmt.strip():
+                _process_text(stmt, "belief", t, all_objs)
+            for tg in tags:
+                if isinstance(tg, str) and not _OBJ_ID_PATTERN.fullmatch(tg.strip()):
+                    for oid in all_objs:
+                        _add_record(oid, tg, "belief", t, str(stmt or tg), explicit=False)
+
+    # 4. Process episodes if provided
+    for ep in episodes:
+        summary = ep.get("summary") if isinstance(ep, Mapping) else getattr(ep, "summary", None)
+        t = int((ep.get("tick") if isinstance(ep, Mapping) else getattr(ep, "tick", 0)) or 0)
+        if isinstance(summary, str) and summary.strip():
+            _process_text(summary, "thought", t)
+
+    creator_labels = world.creator_labels if world is not None else {}
+
+    def _obj_sort_key(oid: str) -> tuple[int, str]:
+        try:
+            return (int(oid.replace("object_", "")), oid)
+        except ValueError:
+            return (999999, oid)
+
+    names_by_object: dict[str, dict[str, Any]] = {}
+    entries_list: list[dict[str, Any]] = []
+    word_to_objects: dict[str, list[str]] = {}
+
+    for oid in sorted(records_by_obj.keys(), key=_obj_sort_key):
+        raw_recs = records_by_obj[oid]
+        # Score words by explicitness, frequency, and recency
+        word_stats: dict[str, dict[str, Any]] = {}
+        by_source: dict[str, list[str]] = {"speak": [], "thought": [], "belief": []}
+        dedup_sources: list[dict[str, Any]] = []
+        seen_src_keys: set[tuple[str, str, int]] = set()
+
+        for r in raw_recs:
+            w = r["word"]
+            src = r["source"]
+            tk = r["tick"]
+            st = word_stats.setdefault(
+                w,
+                {"word": w, "count": 0, "explicit": False, "last_tick": tk, "sources": set()},
+            )
+            st["count"] += 1
+            if r.get("explicit"):
+                st["explicit"] = True
+            if tk >= st["last_tick"]:
+                st["last_tick"] = tk
+            st["sources"].add(src)
+
+            if src in by_source and w not in by_source[src]:
+                by_source[src].append(w)
+
+            src_key = (w, src, tk)
+            if src_key not in seen_src_keys:
+                seen_src_keys.add(src_key)
+                dedup_sources.append(
+                    {
+                        "word": w,
+                        "source": src,
+                        "tick": tk,
+                        "text": r["text"],
+                    }
+                )
+
+        ranked_words = sorted(
+            word_stats.values(),
+            key=lambda item: (
+                1 if item["explicit"] else 0,
+                len(item["sources"]),
+                item["count"],
+                item["last_tick"],
+                len(item["word"].split()),
+            ),
+            reverse=True,
+        )
+        words_list = [item["word"] for item in ranked_words]
+        for w in words_list:
+            objs_for_w = word_to_objects.setdefault(w, [])
+            if oid not in objs_for_w:
+                objs_for_w.append(oid)
+
+        c_label = creator_labels.get(oid)
+        if c_label is None and world is not None and oid in world.objects:
+            c_label = world.objects[oid].creator_label
+
+        source_kinds = [src for src in ("speak", "thought", "belief") if by_source.get(src)]
+        entry_dict = {
+            "object_id": oid,
+            "id": oid,
+            "primary_name": words_list[0] if words_list else None,
+            "name": words_list[0] if words_list else None,
+            "names": words_list,
+            "words": words_list,
+            "sources": source_kinds,
+            "source_records": dedup_sources,
+            "by_source": by_source,
+            "creator_label": c_label,
+            "mentions": len(dedup_sources),
+            "count": len(dedup_sources),
+        }
+        names_by_object[oid] = entry_dict
+        entries_list.append(entry_dict)
+
+    return {
+        "tick": world.tick if world is not None else 0,
+        "names": names_by_object,
+        "by_object": names_by_object,
+        "objects": names_by_object,
+        "mappings": entries_list,
+        "items": entries_list,
+        "entries": entries_list,
+        "word_to_objects": word_to_objects,
+        "count": len(entries_list),
+    }
 
 
 class SimulationService:
@@ -451,6 +1111,9 @@ class SimulationService:
         )
         self._ws_clients: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue[dict[str, Any]]]] = []
         self.event_history: list[dict[str, Any]] = []
+        self.timeline_entries: list[dict[str, Any]] = []
+        self._timeline_seq: int = 0
+        self.spoke_history: list[dict[str, Any]] = []
         self._bg_task: asyncio.Task[None] | None = None
         self._running: bool = False
 
@@ -536,6 +1199,25 @@ class SimulationService:
                 continue
         return payload
 
+    def _append_timeline_entry(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+        """Append a structured observer timeline entry."""
+        with self._lock:
+            self._timeline_seq += 1
+            raw_entry = dict(entry)
+            details = dict(raw_entry.get("details") or {})
+            for k, v in raw_entry.items():
+                if k not in ("id", "details") and k not in details:
+                    details[k] = v
+            record = {
+                "id": self._timeline_seq,
+                **raw_entry,
+                "details": details,
+            }
+            self.timeline_entries.append(record)
+            if len(self.timeline_entries) > 1000:
+                self.timeline_entries = self.timeline_entries[-1000:]
+            return record
+
     def _on_world_event(self, event: WorldEvent) -> None:
         """Translate world, gate, agent, and memory events into WebSocket stream messages."""
         if isinstance(event, GateDecisionEvent) or event.type == "gate_decision":
@@ -560,6 +1242,19 @@ class SimulationService:
 
         if isinstance(event, WakeEvent) or event.type == "wake":
             reasons = list(getattr(event, "reasons", ()))
+            reason_str = ", ".join(reasons) if reasons else None
+            self._append_timeline_entry(
+                {
+                    "kind": "wake",
+                    "type": "wake",
+                    "event": "wake",
+                    "tick": event.tick,
+                    "source": event.source,
+                    "reasons": reasons,
+                    "reason": reason_str,
+                    "summary": f"Wake ({reason_str or 'trigger'})",
+                }
+            )
             self._broadcast(
                 {
                     "type": "wake",
@@ -568,7 +1263,7 @@ class SimulationService:
                     "tick": event.tick,
                     "source": event.source,
                     "reasons": reasons,
-                    "reason": ", ".join(reasons) if reasons else None,
+                    "reason": reason_str,
                 }
             )
             return
@@ -596,6 +1291,37 @@ class SimulationService:
             wake_if_list = list(getattr(event, "wake_if", ()))
             reasons_list = list(getattr(event, "reasons", ()))
 
+            self._append_timeline_entry(
+                {
+                    "kind": "intent",
+                    "type": "intent",
+                    "event": "intent_set",
+                    "tick": event.tick,
+                    "source": event.source,
+                    "intent": intent_dict,
+                    "goal": goal_str,
+                    "thought": thought_str,
+                    "expect": expect_str,
+                    "confidence": conf_val,
+                    "steps": steps_list,
+                    "wake_if": wake_if_list,
+                    "reasons": reasons_list,
+                    "summary": f"Intent: {goal_str or 'idle'}",
+                }
+            )
+            self._append_timeline_entry(
+                {
+                    "kind": "thought",
+                    "type": "thought",
+                    "event": "thought",
+                    "tick": event.tick,
+                    "source": event.source,
+                    "thought": thought_str,
+                    "text": thought_str,
+                    "goal": goal_str,
+                    "summary": str(thought_str or ""),
+                }
+            )
             self._broadcast(
                 {
                     "type": "intent",
@@ -673,6 +1399,27 @@ class SimulationService:
             return
 
         if isinstance(event, IntentEndedEvent) or event.type == "intent_ended":
+            status_str = getattr(event, "status", "succeeded")
+            ok_val = bool(getattr(event, "ok", True))
+            goal_str = getattr(event, "goal", None)
+            reason_str = getattr(event, "reason", None)
+            self._append_timeline_entry(
+                {
+                    "kind": "intent",
+                    "type": "intent_ended",
+                    "event": "intent_ended",
+                    "tick": event.tick,
+                    "source": event.source,
+                    "status": status_str,
+                    "ok": ok_val,
+                    "goal": goal_str,
+                    "reason": reason_str,
+                    "summary": (
+                        f"Intent {status_str}: {goal_str or ''}"
+                        f"{f' ({reason_str})' if reason_str else ''}"
+                    ).strip(),
+                }
+            )
             self._broadcast(
                 {
                     "type": "intent_ended",
@@ -680,10 +1427,10 @@ class SimulationService:
                     "category": "agent_event",
                     "tick": event.tick,
                     "source": event.source,
-                    "status": getattr(event, "status", "succeeded"),
-                    "ok": bool(getattr(event, "ok", True)),
-                    "goal": getattr(event, "goal", None),
-                    "reason": getattr(event, "reason", None),
+                    "status": status_str,
+                    "ok": ok_val,
+                    "goal": goal_str,
+                    "reason": reason_str,
                 }
             )
             return
@@ -755,6 +1502,83 @@ class SimulationService:
                 for oid in sorted(self.world.objects)
             }
 
+        if isinstance(event, SpokeEvent) or event.type == "spoke":
+            spoke_text = str(event.text or "")
+            context_objs: list[str] = []
+            if self.world.body.holding:
+                context_objs.append(self.world.body.holding)
+            active_int = self.loop.controller.intent or self.last_intent
+            if active_int is not None:
+                for st in active_int.steps:
+                    if st.target and st.target not in context_objs:
+                        context_objs.append(st.target)
+                for m in _OBJ_ID_PATTERN.findall(f"{active_int.goal} {active_int.thought}"):
+                    ml = m.lower()
+                    if ml not in context_objs:
+                        context_objs.append(ml)
+            self.spoke_history.append(
+                {
+                    "tick": event.tick,
+                    "text": spoke_text,
+                    "holding": self.world.body.holding,
+                    "context_objects": context_objs,
+                }
+            )
+            self._append_timeline_entry(
+                {
+                    "kind": "action",
+                    "type": "spoke",
+                    "event": "spoke",
+                    "subkind": "speak",
+                    "tick": event.tick,
+                    "source": "agent",
+                    "verb": "speak",
+                    "action": "speak",
+                    "text": spoke_text,
+                    "params": {"text": spoke_text},
+                    "summary": f'speak: "{spoke_text}"',
+                }
+            )
+        elif isinstance(event, WeatherChangedEvent) or event.type == "weather_changed":
+            w_type = getattr(event, "weather_type", self.world.weather_type)
+            w_int = getattr(event, "intensity", self.world.weather_intensity)
+            self._append_timeline_entry(
+                {
+                    "kind": "action",
+                    "type": "weather_changed",
+                    "event": "weather_changed",
+                    "subkind": "weather",
+                    "tick": event.tick,
+                    "source": event.source,
+                    "verb": "weather_changed",
+                    "action": "weather_changed",
+                    "weather_type": w_type,
+                    "intensity": w_int,
+                    "summary": f"Weather changed to {w_type} ({round(float(w_int or 0) * 100)}%)",
+                }
+            )
+
+        agent_action_dict: dict[str, Any] | None = None
+        if event.type == "tick":
+            last_status = getattr(self.loop, "_last_controller_status", None)
+            if last_status is not None and not last_status.is_idle and last_status.step is not None:
+                step_obj = last_status.step
+                step_d = (
+                    step_obj.model_dump(mode="json")
+                    if hasattr(step_obj, "model_dump")
+                    else dict(step_obj)
+                )
+                res_obj = getattr(last_status, "result", None)
+                agent_action_dict = {
+                    "verb": step_d.get("verb"),
+                    "target": step_d.get("target"),
+                    "params": step_d.get("params") or {},
+                    "status": last_status.state,
+                    "ok": bool(res_obj.ok) if res_obj is not None else last_status.ok,
+                    "reason": last_status.reason
+                    or (res_obj.reason if res_obj is not None else None),
+                }
+
         delta_payload: dict[str, Any] = {
             "event": event.type,
             "tick": event.tick,
@@ -774,6 +1598,8 @@ class SimulationService:
             delta_payload["text"] = event.text
         if objects_map:
             delta_payload["objects"] = objects_map
+        if agent_action_dict is not None:
+            delta_payload["agent_action"] = agent_action_dict
         if event.type == "object_spawned" and obj_dict is not None:
             delta_payload["spawned"] = [obj_dict]
             delta_payload["action"] = "spawn"
@@ -817,6 +1643,8 @@ class SimulationService:
             msg["changes"] = event.changes
         if objects_map:
             msg["objects"] = objects_map
+        if agent_action_dict is not None:
+            msg["agent_action"] = agent_action_dict
         if event.type == "object_spawned":
             msg["action"] = "spawn"
         elif event.type == "object_despawned":
@@ -834,6 +1662,22 @@ class SimulationService:
     ) -> dict[str, Any]:
         """Broadcast a ``creator_action`` event on the WebSocket stream."""
         details_dict = dict(details) if details is not None else {}
+        self._append_timeline_entry(
+            {
+                "kind": "action",
+                "type": "creator_action",
+                "event": "creator_action",
+                "subkind": "creator_action",
+                "action": action,
+                "verb": action,
+                "source": "creator",
+                "tick": self.world.tick,
+                "object_id": extra.get("object_id") or details_dict.get("object_id"),
+                "text": extra.get("text") or details_dict.get("text"),
+                "details": details_dict,
+                "summary": f"Creator: {action}",
+            }
+        )
         msg: dict[str, Any] = {
             "type": "creator_action",
             "event": "creator_action",
@@ -851,7 +1695,7 @@ class SimulationService:
     # ------------------------------------------------------------------
 
     def _record_tick_in_memory(self, result: TickResult) -> None:
-        """Record active controller actions into the short-term memory buffer."""
+        """Record active controller actions into the short-term memory buffer and timeline."""
         status = result.controller_status
         if not status.is_idle and status.step is not None:
             s_val = float(result.surprise_signal.score) if result.surprise_signal is not None else 0.0
@@ -867,6 +1711,43 @@ class SimulationService:
                 surprise_kind=s_kind,
                 resting=False,
             )
+            step_obj = status.step
+            verb_str = str(getattr(step_obj, "verb", "") or "")
+            target_str = getattr(step_obj, "target", None)
+            params_dict = dict(getattr(step_obj, "params", {}) or {})
+            res_obj = getattr(status, "result", None)
+            ok_val = bool(res_obj.ok) if res_obj is not None else status.ok
+            reason_val = status.reason or (res_obj.reason if res_obj is not None else None)
+            # Avoid duplicating a speak entry if SpokeEvent already added one on this tick
+            already_spoke = (
+                verb_str == "speak"
+                and self.timeline_entries
+                and self.timeline_entries[-1].get("subkind") == "speak"
+                and self.timeline_entries[-1].get("tick") == result.tick
+            )
+            if not already_spoke:
+                self._append_timeline_entry(
+                    {
+                        "kind": "action",
+                        "type": "agent_action",
+                        "event": "agent_action",
+                        "subkind": "agent_action",
+                        "tick": result.tick,
+                        "source": "agent",
+                        "verb": verb_str,
+                        "action": verb_str,
+                        "target": target_str,
+                        "object_id": target_str,
+                        "params": params_dict,
+                        "status": status.state,
+                        "ok": ok_val,
+                        "reason": reason_val,
+                        "summary": (
+                            f"{verb_str}{f' {target_str}' if target_str else ''}"
+                            f"{f' ({reason_val})' if reason_val else ''}"
+                        ),
+                    }
+                )
 
     def step(self, ticks: int = 1) -> list[TickResult]:
         """Advance the simulation and agent loop by ``ticks`` ticks synchronously (even if paused)."""
@@ -1247,7 +2128,13 @@ class SimulationService:
     def get_inbox_payload(self) -> dict[str, Any]:
         """Return the creator inbox messages, preserved objects, and audit log."""
         with self._lock:
-            entries = [entry.to_dict() for entry in self.world.inbox.all()]
+            entries = []
+            for entry in self.world.inbox.all():
+                d = entry.to_dict()
+                d.setdefault("message", d.get("text"))
+                d.setdefault("note", d.get("creator_note"))
+                d.setdefault("reason", d.get("delivery_reason"))
+                entries.append(d)
             logs = [log_item.to_dict() for log_item in self.world.inbox.logs()]
             return {
                 "tick": self.world.tick,
@@ -1342,6 +2229,157 @@ class SimulationService:
                 "speed": self.clock.speed,
                 "tick_rate": self.clock.tick_rate,
                 "effective_tick_rate": self.clock.effective_tick_rate,
+            }
+
+    def get_presets_payload(self) -> dict[str, Any]:
+        """Return the first-run object property presets."""
+        items = get_spawn_presets()
+        by_key = {item["key"]: item["props"] for item in items}
+        return {
+            "presets": items,
+            "items": items,
+            "by_key": by_key,
+            "count": len(items),
+        }
+
+    def get_timeline_payload(
+        self,
+        *,
+        kind: str | Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Return observer timeline entries (wakes, thoughts, intents, actions), optionally filtered by kind."""
+        with self._lock:
+            all_entries = list(self.timeline_entries)
+
+            allowed_kinds: set[str] = set()
+            if isinstance(kind, str) and kind.strip():
+                for part in kind.split(","):
+                    cleaned = part.strip().lower()
+                    if not cleaned or cleaned == "all":
+                        continue
+                    if cleaned in ("thoughts", "thought"):
+                        allowed_kinds.add("thought")
+                    elif cleaned in ("intents", "intent", "intent_set", "intent_ended"):
+                        allowed_kinds.add("intent")
+                    elif cleaned in ("wakes", "wake"):
+                        allowed_kinds.add("wake")
+                    elif cleaned in ("actions", "action", "agent_action", "creator_action"):
+                        allowed_kinds.add("action")
+                    else:
+                        allowed_kinds.add(cleaned)
+            elif isinstance(kind, Sequence) and not isinstance(kind, str | bytes):
+                for item in kind:
+                    cleaned = str(item).strip().lower()
+                    if cleaned and cleaned != "all":
+                        allowed_kinds.add(cleaned.rstrip("s") if cleaned.endswith("s") else cleaned)
+
+            if allowed_kinds:
+                filtered = [
+                    e
+                    for e in all_entries
+                    if str(e.get("kind", "")).lower() in allowed_kinds
+                    or str(e.get("type", "")).lower() in allowed_kinds
+                    or str(e.get("subkind", "")).lower() in allowed_kinds
+                ]
+            else:
+                filtered = all_entries
+
+            if limit is not None and limit > 0:
+                filtered = filtered[-int(limit):]
+
+            return {
+                "tick": self.world.tick,
+                "kind": kind if isinstance(kind, str) else "all",
+                "timeline": filtered,
+                "items": filtered,
+                "entries": filtered,
+                "events": filtered,
+                "count": len(filtered),
+                "total": len(all_entries),
+                "kinds": ["wake", "thought", "intent", "action"],
+            }
+
+    def get_names_payload(self) -> dict[str, Any]:
+        """Extract and return words/names the agent uses for objects from speak, thoughts, and beliefs."""
+        with self._lock:
+            speeches: list[Any] = list(self.spoke_history)
+            for entry in self.world.inbox.all():
+                if entry.text:
+                    speeches.append(
+                        {
+                            "tick": entry.tick,
+                            "text": entry.text,
+                            "object_id": entry.object_id,
+                            "context_objects": [
+                                oid
+                                for oid in (entry.object_id, entry.mailbox_id)
+                                if isinstance(oid, str)
+                            ],
+                        }
+                    )
+            for buf_entry in getattr(self.memory.buffer, "entries", ()):
+                act = getattr(buf_entry, "action", None)
+                verb = act.get("verb") if isinstance(act, Mapping) else getattr(act, "verb", None)
+                if verb == "speak":
+                    params = (
+                        act.get("params")
+                        if isinstance(act, Mapping)
+                        else getattr(act, "params", {})
+                    ) or {}
+                    txt = params.get("text")
+                    if isinstance(txt, str) and txt.strip():
+                        speeches.append({"tick": getattr(buf_entry, "tick", 0), "text": txt})
+
+            thoughts: list[Any] = list(self.loop.intent_set_events)
+            if self.last_intent is not None and not any(
+                getattr(ev, "intent", None) is self.last_intent
+                for ev in self.loop.intent_set_events
+            ):
+                thoughts.append(self.last_intent)
+            for tl_item in self.timeline_entries:
+                if tl_item.get("kind") in ("thought", "intent"):
+                    thoughts.append(tl_item)
+
+            beliefs = list(self.memory.belief_store.all())
+            episodes = list(self.memory.store.all())
+
+            return extract_object_names(
+                speeches=speeches,
+                thoughts=thoughts,
+                beliefs=beliefs,
+                episodes=episodes,
+                world=self.world,
+            )
+
+    def update_inbox_note(
+        self,
+        note: str | None,
+        *,
+        entry_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Update a private creator note on an inbox message or experiment without sending any acknowledgement."""
+        with self._lock:
+            updated_entry_dict: dict[str, Any] | None = None
+            if entry_id is not None:
+                updated_entry = self.world.mailbox.update_entry_note(int(entry_id), note)
+                updated_entry_dict = updated_entry.to_dict()
+                updated_entry_dict.setdefault("message", updated_entry_dict.get("text"))
+                updated_entry_dict.setdefault("note", updated_entry_dict.get("creator_note"))
+                updated_entry_dict.setdefault("reason", updated_entry_dict.get("delivery_reason"))
+            else:
+                self.world.mailbox.set_creator_note(note)
+
+            inbox_payload = self.get_inbox_payload()
+            return {
+                "ok": True,
+                "tick": self.world.tick,
+                "creator_note": self.world.creator_note,
+                "note": note,
+                "entry_id": int(entry_id) if entry_id is not None else None,
+                "entry": updated_entry_dict,
+                **inbox_payload,
+                "inbox": inbox_payload,
             }
 
     # ------------------------------------------------------------------
@@ -1727,12 +2765,23 @@ def create_app(
             )
         expected = sim_service.creator_token
         provided = _extract_request_token(request)
-        if not provided:
-            raise HTTPException(
-                status_code=401,
-                detail="Creator token required.",
-            )
-        if not expected or not secrets.compare_digest(provided, expected):
+        if expected:
+            if not provided:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Creator token required.",
+                )
+            if not secrets.compare_digest(provided, expected):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid creator token.",
+                )
+        elif not is_local_host(sim_service.host):
+            if not provided:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Creator token required.",
+                )
             raise HTTPException(
                 status_code=403,
                 detail="Invalid creator token.",
@@ -1754,7 +2803,15 @@ def create_app(
     @app.get("/health", dependencies=[Depends(_require_read_access)])
     @app.get("/status", dependencies=[Depends(_require_read_access)])
     @app.get("/api/status", dependencies=[Depends(_require_read_access)])
-    async def get_status() -> dict[str, Any]:
+    async def get_status(request: Request) -> dict[str, Any]:
+        expected = sim_service.creator_token
+        provided = _extract_request_token(request)
+        is_auth = False
+        if not sim_service.spectator_mode and not _is_spectator_request(request):
+            if expected:
+                is_auth = bool(provided and secrets.compare_digest(provided, expected))
+            else:
+                is_auth = is_local_host(sim_service.host)
         return {
             "status": "ok",
             "version": __version__,
@@ -1764,7 +2821,110 @@ def create_app(
             "speed": sim_service.speed,
             "spectator_enabled": sim_service.spectator_enabled,
             "spectator_mode": sim_service.spectator_mode,
+            "auth_required": bool(expected),
+            "authenticated": is_auth,
         }
+
+    @app.post("/auth", response_model=None)
+    @app.post("/login", response_model=None)
+    @app.post("/api/auth", response_model=None)
+    @app.post("/api/login", response_model=None)
+    async def verify_creator_auth(request: Request) -> dict[str, Any] | JSONResponse:
+        if sim_service.spectator_mode or _is_spectator_request(request):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "authenticated": False,
+                    "mode": "spectator",
+                    "detail": "Spectator mode cannot mutate.",
+                },
+            )
+        provided = _extract_request_token(request)
+        if not provided:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            if isinstance(body, str) and body.strip():
+                provided = body.strip()
+            elif isinstance(body, Mapping):
+                for k in ("token", "creator_token", "api_key", "password"):
+                    val = body.get(k)
+                    if isinstance(val, str) and val.strip():
+                        provided = val.strip()
+                        break
+        expected = sim_service.creator_token
+        if expected:
+            if not provided:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "ok": False,
+                        "authenticated": False,
+                        "auth_required": True,
+                        "mode": "spectator",
+                        "detail": "Creator token required.",
+                    },
+                )
+            if not secrets.compare_digest(provided, expected):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "ok": False,
+                        "authenticated": False,
+                        "auth_required": True,
+                        "mode": "spectator",
+                        "detail": "Invalid creator token.",
+                    },
+                )
+        elif not is_local_host(sim_service.host):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "ok": False,
+                    "authenticated": False,
+                    "auth_required": True,
+                    "mode": "spectator",
+                    "detail": "Invalid creator token.",
+                },
+            )
+        return {
+            "ok": True,
+            "authenticated": True,
+            "auth_required": bool(expected),
+            "mode": "creator",
+            "role": "creator",
+            "spectator_mode": False,
+        }
+
+    @app.get("/presets", dependencies=[Depends(_require_read_access)])
+    @app.get("/objects/presets", dependencies=[Depends(_require_read_access)])
+    @app.get("/world/presets", dependencies=[Depends(_require_read_access)])
+    @app.get("/api/presets", dependencies=[Depends(_require_read_access)])
+    async def get_presets() -> dict[str, Any]:
+        return sim_service.get_presets_payload()
+
+    @app.get("/timeline", dependencies=[Depends(_require_read_access)])
+    @app.get("/events", dependencies=[Depends(_require_read_access)])
+    @app.get("/agent/timeline", dependencies=[Depends(_require_read_access)])
+    @app.get("/observer/timeline", dependencies=[Depends(_require_read_access)])
+    @app.get("/api/timeline", dependencies=[Depends(_require_read_access)])
+    async def get_timeline(
+        kind: str | None = None,
+        filter: str | None = None,
+        type: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        eff_kind = kind if kind is not None else (filter if filter is not None else type)
+        return sim_service.get_timeline_payload(kind=eff_kind, limit=limit)
+
+    @app.get("/names", dependencies=[Depends(_require_read_access)])
+    @app.get("/agent/names", dependencies=[Depends(_require_read_access)])
+    @app.get("/observer/names", dependencies=[Depends(_require_read_access)])
+    @app.get("/api/names", dependencies=[Depends(_require_read_access)])
+    async def get_names() -> dict[str, Any]:
+        return sim_service.get_names_payload()
 
     @app.get("/snapshot", dependencies=[Depends(_require_read_access)])
     @app.get("/world", dependencies=[Depends(_require_read_access)])
@@ -2098,14 +3258,14 @@ def create_app(
         mailbox_id = raw.pop("mailbox_id", None)
         note = raw.pop("note", raw.pop("creator_note", None))
 
-        if "entry_id" in raw or "inbox_id" in raw:
-            target_ref: Any = raw.get("entry_id", raw.get("inbox_id"))
-        elif "props" in raw and isinstance(raw["props"], Mapping):
-            target_ref = dict(raw["props"])
-        elif "object" in raw and isinstance(raw["object"], Mapping):
+        if "props" in raw and isinstance(raw["props"], Mapping) and not raw.get("return_preserved_object"):
+            target_ref: Any = dict(raw["props"])
+        elif "object" in raw and isinstance(raw["object"], Mapping) and not raw.get("return_preserved_object"):
             target_ref = dict(raw["object"])
-        elif "properties" in raw and isinstance(raw["properties"], Mapping):
+        elif "properties" in raw and isinstance(raw["properties"], Mapping) and not raw.get("return_preserved_object"):
             target_ref = dict(raw["properties"])
+        elif "entry_id" in raw or "inbox_id" in raw:
+            target_ref = raw.get("entry_id", raw.get("inbox_id"))
         else:
             target_ref = raw
 
@@ -2126,6 +3286,56 @@ def create_app(
             "id": spawned.id,
             "object": spawned.model_dump(mode="json"),
         }
+
+    async def _handle_inbox_note(entry_id: int | None, request: Request) -> dict[str, Any]:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target_entry_id = entry_id
+        note_val: str | None = None
+        if isinstance(body, str):
+            note_val = body
+        elif isinstance(body, Mapping):
+            raw_id = body.get("entry_id", body.get("inbox_id", body.get("id")))
+            if target_entry_id is None and raw_id is not None and not isinstance(raw_id, bool):
+                try:
+                    target_entry_id = int(raw_id)
+                except (ValueError, TypeError) as exc:
+                    raise HTTPException(status_code=400, detail="entry_id must be an integer") from exc
+            raw_note = body.get(
+                "note",
+                body.get("creator_note", body.get("private_note", body.get("text"))),
+            )
+            note_val = str(raw_note) if raw_note is not None else None
+        else:
+            raise HTTPException(status_code=400, detail="Invalid note payload")
+
+        try:
+            payload = sim_service.update_inbox_note(note_val, entry_id=target_entry_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        await asyncio.sleep(0)
+        return payload
+
+    @app.post("/inbox/note", dependencies=[Depends(_require_creator_access)])
+    @app.put("/inbox/note", dependencies=[Depends(_require_creator_access)])
+    @app.patch("/inbox/note", dependencies=[Depends(_require_creator_access)])
+    @app.post("/mailbox/note", dependencies=[Depends(_require_creator_access)])
+    @app.post("/creator/note", dependencies=[Depends(_require_creator_access)])
+    @app.post("/api/inbox/note", dependencies=[Depends(_require_creator_access)])
+    async def creator_set_inbox_note(request: Request) -> dict[str, Any]:
+        return await _handle_inbox_note(None, request)
+
+    @app.post("/inbox/{entry_id}/note", dependencies=[Depends(_require_creator_access)])
+    @app.put("/inbox/{entry_id}/note", dependencies=[Depends(_require_creator_access)])
+    @app.patch("/inbox/{entry_id}/note", dependencies=[Depends(_require_creator_access)])
+    @app.post("/api/inbox/{entry_id}/note", dependencies=[Depends(_require_creator_access)])
+    async def creator_set_inbox_entry_note(entry_id: int, request: Request) -> dict[str, Any]:
+        return await _handle_inbox_note(entry_id, request)
 
     @app.post("/weather", dependencies=[Depends(_require_creator_access)])
     @app.put("/weather", dependencies=[Depends(_require_creator_access)])
@@ -2546,6 +3756,7 @@ def run_server(
 serve = run_server
 
 __all__ = [
+    "FIRST_RUN_PRESETS",
     "LOCAL_HOSTS",
     "SCHEMA_VERSION",
     "WS_SCHEMA_VERSION",
@@ -2553,7 +3764,9 @@ __all__ = [
     "SimulationService",
     "build_app",
     "create_app",
+    "extract_object_names",
     "get_app",
+    "get_spawn_presets",
     "is_local_host",
     "make_app",
     "resolve_creator_token",
