@@ -1,0 +1,16 @@
+[world]
+tick_rate = 10.0
+seed = 0
+
+[llm]
+backend = "mock"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen2.5:7b-instruct"
+temperature = 0.2
+timeout_s = 30.0
+max_retries = 2
+
+[observer]
+runs_dir = "data/runs"
+max_bytes = 1048576
+enabled = true
