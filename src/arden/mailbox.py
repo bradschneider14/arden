@@ -495,6 +495,34 @@ class CreatorInbox:
 
     set_note = set_creator_note
 
+    def update_note(self, entry_id: int, note: str | None, *, tick: int = 0) -> InboxEntry:
+        """Update the private creator note on a specific inbox entry without sending any acknowledgement."""
+        existing = self.get(int(entry_id))
+        if existing is None:
+            raise KeyError(f"no inbox entry found with id={entry_id!r}")
+        conn = self.connection
+        conn.execute(
+            "UPDATE creator_inbox SET creator_note = ? WHERE id = ?",
+            (note, int(entry_id)),
+        )
+        conn.commit()
+        updated = self.get(int(entry_id))
+        assert updated is not None
+        self.log_event(
+            "creator_action",
+            tick=tick,
+            mailbox_id=updated.mailbox_id,
+            text=updated.text,
+            object_id=updated.object_id,
+            object_data=updated.object_data,
+            creator_note=note,
+            details={"action": "update_entry_note", "inbox_id": int(entry_id)},
+        )
+        return updated
+
+    update_entry_note = update_note
+    set_entry_note = update_note
+
     def log_event(
         self,
         kind: MailboxLogKind,
@@ -1008,6 +1036,12 @@ class MailboxManager:
         self.inbox.set_creator_note(note, tick=self.world.tick)
 
     set_note = set_creator_note
+
+    def update_entry_note(self, entry_id: int, note: str | None) -> InboxEntry:
+        """Update the private creator note on a specific inbox entry without sending any acknowledgement."""
+        return self.inbox.update_note(entry_id, note, tick=self.world.tick)
+
+    update_note = update_entry_note
 
     def mailbox_objects(self) -> list[WorldObject]:
         """Return all mailbox objects in ``world.objects`` sorted by id."""

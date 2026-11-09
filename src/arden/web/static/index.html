@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Arden — Live World Viewer</title>
+    <title>Arden — Creator Console &amp; Live World</title>
     <link rel="stylesheet" href="./styles.css" />
     <script
       src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js"
@@ -11,7 +11,7 @@
     ></script>
   </head>
   <body>
-    <div class="app-shell">
+    <div id="app-shell" class="app-shell" data-spectator="false">
       <header class="top-hud">
         <div class="brand-group">
           <h1 class="brand-title">Arden Live World</h1>
@@ -19,6 +19,7 @@
             <span class="conn-dot"></span>
             <span id="conn-text">Connecting…</span>
           </div>
+          <span id="auth-mode-badge" class="mode-badge" data-mode="creator">Creator Mode</span>
         </div>
 
         <div class="hud-metrics">
@@ -59,6 +60,29 @@
             <span id="hud-holding" class="hud-val">none</span>
           </div>
         </div>
+
+        <form id="creator-login-form" class="login-bar" autocomplete="off">
+          <label for="creator-token-input" class="hud-label">Creator Token</label>
+          <input
+            id="creator-token-input"
+            class="console-input console-input-token"
+            type="password"
+            placeholder="Token (sessionStorage)"
+            aria-label="Creator token"
+          />
+          <button id="btn-creator-login" class="ctrl-btn ctrl-btn-primary" type="submit">
+            Login
+          </button>
+          <button
+            id="btn-spectator-toggle"
+            class="ctrl-btn"
+            type="button"
+            title="Toggle spectator mode (hides all creator controls)"
+          >
+            Spectator Mode
+          </button>
+          <span id="auth-status-msg" class="auth-status-msg" aria-live="polite"></span>
+        </form>
       </header>
 
       <main class="workspace">
@@ -76,6 +100,9 @@
             <button id="btn-reset-view" class="ctrl-btn" type="button" title="Reset view (0)">
               Reset
             </button>
+            <span class="drag-hint creator-only" data-creator-only="true">
+              Drag object to move &middot; Drag ground to pan
+            </span>
           </div>
 
           <div class="agent-banner">
@@ -97,26 +124,550 @@
         </section>
 
         <aside class="sidebar">
-          <section id="object-inspector" class="panel-section panel-section-inspector" data-empty="true">
-            <div class="panel-header">
-              <h2 class="panel-title">Object Inspector</h2>
-              <button id="btn-close-inspector" class="ctrl-btn" type="button" title="Clear selection">
-                &times;
-              </button>
-            </div>
-            <div id="inspector-body">
-              <p class="inspector-placeholder">
-                Click any object in the world (or in the object list below) to inspect its internal ID and physical properties.
-              </p>
-            </div>
-          </section>
+          <nav class="console-tabs" role="tablist" aria-label="Console and observer views">
+            <button
+              type="button"
+              class="console-tab is-active"
+              data-tab-target="world"
+              role="tab"
+              aria-selected="true"
+            >
+              Inspector
+            </button>
+            <button
+              type="button"
+              class="console-tab creator-only"
+              data-creator-only="true"
+              data-tab-target="controls"
+              role="tab"
+              aria-selected="false"
+            >
+              Controls
+            </button>
+            <button
+              type="button"
+              class="console-tab"
+              data-tab-target="inbox"
+              role="tab"
+              aria-selected="false"
+            >
+              Inbox (<span id="inbox-badge-count">0</span>)
+            </button>
+            <button
+              type="button"
+              class="console-tab"
+              data-tab-target="timeline"
+              role="tab"
+              aria-selected="false"
+            >
+              Timeline
+            </button>
+            <button
+              type="button"
+              class="console-tab"
+              data-tab-target="beliefs"
+              role="tab"
+              aria-selected="false"
+            >
+              Beliefs
+            </button>
+            <button
+              type="button"
+              class="console-tab"
+              data-tab-target="names"
+              role="tab"
+              aria-selected="false"
+            >
+              Names
+            </button>
+          </nav>
 
-          <section class="panel-section panel-section-list">
-            <div class="panel-header">
-              <h2 class="panel-title">World Objects (<span id="object-count">0</span>)</h2>
-            </div>
-            <div id="object-list" class="object-list"></div>
-          </section>
+          <div id="console-feedback" class="console-feedback" hidden></div>
+
+          <!-- 1. WORLD INSPECTOR & OBJECT LIST -->
+          <div id="tab-pane-world" class="tab-pane is-active" data-tab-pane="world">
+            <section
+              id="object-inspector"
+              class="panel-section panel-section-inspector"
+              data-empty="true"
+            >
+              <div class="panel-header">
+                <h2 class="panel-title">Object Inspector</h2>
+                <button
+                  id="btn-close-inspector"
+                  class="ctrl-btn"
+                  type="button"
+                  title="Clear selection"
+                >
+                  &times;
+                </button>
+              </div>
+              <div id="inspector-body">
+                <p class="inspector-placeholder">
+                  Click any object in the world (or in the object list below) to inspect its internal ID and physical properties.
+                </p>
+              </div>
+            </section>
+
+            <section class="panel-section panel-section-list">
+              <div class="panel-header">
+                <h2 class="panel-title">World Objects (<span id="object-count">0</span>)</h2>
+              </div>
+              <div id="object-list" class="object-list"></div>
+            </section>
+          </div>
+
+          <!-- 2. CREATOR CONTROLS PANEL (Hidden in Spectator Mode) -->
+          <div
+            id="tab-pane-controls"
+            class="tab-pane creator-only"
+            data-creator-only="true"
+            data-tab-pane="controls"
+          >
+            <section id="panel-controls" class="panel-section">
+              <div class="panel-header">
+                <h2 class="panel-title">Simulation Clock</h2>
+              </div>
+              <div class="control-block">
+                <div class="control-row">
+                  <button id="btn-pause-resume" class="ctrl-btn ctrl-btn-primary" type="button">
+                    Pause
+                  </button>
+                  <label class="inline-label" for="step-ticks-input">Step</label>
+                  <input
+                    id="step-ticks-input"
+                    class="console-input console-input-num"
+                    type="number"
+                    min="1"
+                    max="600"
+                    value="1"
+                  />
+                  <button id="btn-step" class="ctrl-btn" type="button">Step Ticks</button>
+                </div>
+                <div class="control-row">
+                  <label class="inline-label" for="speed-select">Speed</label>
+                  <select id="speed-select" class="console-select">
+                    <option value="0.25">0.25&times;</option>
+                    <option value="0.5">0.5&times;</option>
+                    <option value="1" selected>1.0&times;</option>
+                    <option value="2">2.0&times;</option>
+                    <option value="5">5.0&times;</option>
+                    <option value="10">10.0&times;</option>
+                  </select>
+                  <button id="btn-set-speed" class="ctrl-btn" type="button">Apply Speed</button>
+                </div>
+              </div>
+
+              <div class="panel-header">
+                <h2 class="panel-title">Time of Day &amp; Cycle</h2>
+              </div>
+              <div class="control-block">
+                <div class="control-row">
+                  <input
+                    id="time-slider"
+                    class="console-slider"
+                    type="range"
+                    min="0"
+                    max="0.99"
+                    step="0.01"
+                    value="0.50"
+                  />
+                  <span id="time-slider-label" class="mono-val">0.50 (12:00)</span>
+                </div>
+                <div class="control-row">
+                  <label class="checkbox-label">
+                    <input id="freeze-time-checkbox" type="checkbox" />
+                    Freeze day/night cycle
+                  </label>
+                  <button id="btn-apply-time" class="ctrl-btn" type="button">Set Time</button>
+                </div>
+              </div>
+
+              <div class="panel-header">
+                <h2 class="panel-title">Weather Control &amp; Schedule</h2>
+              </div>
+              <div class="control-block">
+                <div class="control-grid-2">
+                  <label class="field-label">
+                    Weather Type
+                    <select id="weather-type-select" class="console-select">
+                      <option value="clear">clear</option>
+                      <option value="rain">rain</option>
+                      <option value="wind">wind</option>
+                      <option value="cold">cold</option>
+                      <option value="storm">storm</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    Intensity (<span id="weather-intensity-val">0.60</span>)
+                    <input
+                      id="weather-intensity-slider"
+                      class="console-slider"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value="0.60"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Duration (ticks)
+                    <input
+                      id="weather-duration-input"
+                      class="console-input"
+                      type="number"
+                      min="1"
+                      max="5000"
+                      value="120"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Schedule at Tick (optional)
+                    <input
+                      id="weather-start-at-input"
+                      class="console-input"
+                      type="number"
+                      min="0"
+                      placeholder="Immediate"
+                    />
+                  </label>
+                </div>
+                <div class="control-row">
+                  <label class="checkbox-label">
+                    <input id="weather-automation-checkbox" type="checkbox" checked />
+                    Weather automation enabled
+                  </label>
+                  <button id="btn-set-weather" class="ctrl-btn ctrl-btn-primary" type="button">
+                    Set / Schedule Weather
+                  </button>
+                </div>
+                <div id="weather-schedule-list" class="muted-note"></div>
+              </div>
+
+              <div class="panel-header">
+                <h2 class="panel-title">Spawn Object (Presets &amp; Form)</h2>
+              </div>
+              <div class="control-block">
+                <div class="inspector-subhead">First-Run Preset Palette</div>
+                <div id="preset-palette" class="preset-palette"></div>
+
+                <div class="control-grid-2">
+                  <label class="field-label">
+                    Preset
+                    <select id="spawn-preset-select" class="console-select">
+                      <option value="">(Custom properties)</option>
+                      <option value="ball">ball (red sphere)</option>
+                      <option value="stick">stick (long brown)</option>
+                      <option value="flat_stone">flat_stone (heavy gray)</option>
+                      <option value="vine">vine (binding green)</option>
+                      <option value="leaf">leaf (flat green)</option>
+                      <option value="berry">berry (fragile red)</option>
+                      <option value="berry_bush">berry_bush (fixed green)</option>
+                      <option value="hollow_log">hollow_log (hollow cylinder)</option>
+                      <option value="large_tree">large_tree (tall fixed cylinder)</option>
+                      <option value="mailbox">mailbox (hollow blue cube)</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    Creator Label
+                    <input
+                      id="spawn-creator-label"
+                      class="console-input"
+                      type="text"
+                      value="ball"
+                      placeholder="human-only label"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Shape
+                    <select id="spawn-shape" class="console-select">
+                      <option value="sphere">sphere</option>
+                      <option value="cube">cube</option>
+                      <option value="cylinder">cylinder</option>
+                      <option value="flat">flat</option>
+                      <option value="long">long</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    Color
+                    <input id="spawn-color" class="console-input" type="text" value="red" />
+                  </label>
+                  <label class="field-label">
+                    X (m)
+                    <input
+                      id="spawn-x"
+                      class="console-input"
+                      type="number"
+                      step="0.5"
+                      value="7.0"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Y (m)
+                    <input
+                      id="spawn-y"
+                      class="console-input"
+                      type="number"
+                      step="0.5"
+                      value="7.0"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Level
+                    <input id="spawn-level" class="console-input" type="text" value="ground" />
+                  </label>
+                  <label class="field-label">
+                    Height (m)
+                    <input
+                      id="spawn-height"
+                      class="console-input"
+                      type="number"
+                      step="0.05"
+                      value="0.25"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Volume (m&sup3;)
+                    <input
+                      id="spawn-volume"
+                      class="console-input"
+                      type="number"
+                      step="0.001"
+                      value="0.01"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Weight (kg)
+                    <input
+                      id="spawn-weight"
+                      class="console-input"
+                      type="number"
+                      step="0.1"
+                      value="0.4"
+                    />
+                  </label>
+                  <label class="field-label">
+                    Rigidity (0..1)
+                    <input
+                      id="spawn-rigidity"
+                      class="console-input"
+                      type="number"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value="0.6"
+                    />
+                  </label>
+                </div>
+
+                <div class="checkbox-row">
+                  <label class="checkbox-label">
+                    <input id="spawn-hollow" type="checkbox" /> hollow
+                  </label>
+                  <label class="checkbox-label">
+                    <input id="spawn-binding" type="checkbox" /> binding
+                  </label>
+                  <label class="checkbox-label">
+                    <input id="spawn-fragile" type="checkbox" /> fragile
+                  </label>
+                  <label class="checkbox-label">
+                    <input id="spawn-fixed" type="checkbox" /> fixed
+                  </label>
+                </div>
+
+                <div class="control-row">
+                  <button id="btn-spawn-object" class="ctrl-btn ctrl-btn-primary" type="button">
+                    Spawn Object
+                  </button>
+                </div>
+              </div>
+
+              <div class="panel-header">
+                <h2 class="panel-title">Move / Despawn Selected Object</h2>
+              </div>
+              <div class="control-block">
+                <div class="muted-note">
+                  Tip: You can also drag any object directly on the world canvas to move it.
+                </div>
+                <div class="control-row">
+                  <label class="inline-label" for="move-x">X</label>
+                  <input
+                    id="move-x"
+                    class="console-input console-input-num"
+                    type="number"
+                    step="0.5"
+                    value="7.0"
+                  />
+                  <label class="inline-label" for="move-y">Y</label>
+                  <input
+                    id="move-y"
+                    class="console-input console-input-num"
+                    type="number"
+                    step="0.5"
+                    value="7.0"
+                  />
+                  <button id="btn-move-selected" class="ctrl-btn" type="button">
+                    Move Selected
+                  </button>
+                  <button id="btn-despawn-selected" class="ctrl-btn ctrl-btn-danger" type="button">
+                    Despawn Selected
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- 3. INBOX PANEL -->
+          <div id="tab-pane-inbox" class="tab-pane" data-tab-pane="inbox">
+            <section id="panel-inbox" class="panel-section">
+              <div class="panel-header">
+                <h2 class="panel-title">Creator Inbox (<span id="inbox-count">0</span>)</h2>
+              </div>
+              <div class="control-block">
+                <div class="muted-note">
+                  Outgoing messages &amp; items from the agent arrive here. No acknowledgement is sent to the world unless you explicitly Reply or Spawn-in-Response.
+                </div>
+
+                <div class="creator-only" data-creator-only="true">
+                  <div class="inspector-subhead">Private Creator Note (Silent — No Agent Notification)</div>
+                  <div class="control-row">
+                    <input
+                      id="inbox-private-note"
+                      class="console-input"
+                      type="text"
+                      placeholder="Private observation note…"
+                    />
+                    <button id="btn-save-inbox-note" class="ctrl-btn" type="button">
+                      Save Note
+                    </button>
+                  </div>
+
+                  <div class="inspector-subhead">Reply to Agent (Places Letter in Mailbox)</div>
+                  <div class="control-row">
+                    <input
+                      id="inbox-reply-text"
+                      class="console-input"
+                      type="text"
+                      placeholder="Write a reply message for the mailbox…"
+                    />
+                    <button id="btn-inbox-reply" class="ctrl-btn ctrl-btn-primary" type="button">
+                      Send Reply
+                    </button>
+                  </div>
+
+                  <div class="inspector-subhead">Spawn Item in Response (Inside Mailbox)</div>
+                  <div class="control-row">
+                    <select id="inbox-spawn-preset" class="console-select">
+                      <option value="berry">berry (fragile red)</option>
+                      <option value="ball">ball (red sphere)</option>
+                      <option value="stick">stick (long brown)</option>
+                      <option value="leaf">leaf (flat green)</option>
+                      <option value="vine">vine (binding green)</option>
+                      <option value="flat_stone">flat_stone (heavy gray)</option>
+                    </select>
+                    <button id="btn-inbox-spawn-response" class="ctrl-btn" type="button">
+                      Spawn in Mailbox
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div id="inbox-list" class="stack-list"></div>
+            </section>
+          </div>
+
+          <!-- 4. TIMELINE PANEL -->
+          <div id="tab-pane-timeline" class="tab-pane" data-tab-pane="timeline">
+            <section id="panel-timeline" class="panel-section">
+              <div class="panel-header">
+                <h2 class="panel-title">Live Agent Timeline</h2>
+              </div>
+              <div id="timeline-filters" class="filter-bar" role="group" aria-label="Filter timeline by kind">
+                <button
+                  type="button"
+                  class="filter-chip is-active"
+                  data-timeline-filter="all"
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  class="filter-chip"
+                  data-timeline-filter="wake"
+                >
+                  Wakes
+                </button>
+                <button
+                  type="button"
+                  class="filter-chip"
+                  data-timeline-filter="thought"
+                >
+                  Thoughts
+                </button>
+                <button
+                  type="button"
+                  class="filter-chip"
+                  data-timeline-filter="intent"
+                >
+                  Intents
+                </button>
+                <button
+                  type="button"
+                  class="filter-chip"
+                  data-timeline-filter="action"
+                >
+                  Actions
+                </button>
+              </div>
+              <div id="timeline-list" class="stack-list"></div>
+            </section>
+          </div>
+
+          <!-- 5. BELIEFS & SELF-MODEL PANEL -->
+          <div id="tab-pane-beliefs" class="tab-pane" data-tab-pane="beliefs">
+            <section id="panel-beliefs" class="panel-section">
+              <div class="panel-header">
+                <h2 class="panel-title">Self-Model &amp; Versions</h2>
+                <button
+                  id="btn-trigger-reflect"
+                  class="ctrl-btn creator-only"
+                  data-creator-only="true"
+                  type="button"
+                  title="Trigger immediate reflection cycle"
+                >
+                  Reflect Now
+                </button>
+              </div>
+              <div id="self-model-card" class="control-block">
+                <div id="self-model-current" class="self-model-text">
+                  <em>No self-model recorded yet.</em>
+                </div>
+                <div id="self-model-versions" class="version-list"></div>
+              </div>
+
+              <div class="panel-header">
+                <h2 class="panel-title">
+                  Beliefs (<span id="belief-count">0</span>) &amp; Confidence History
+                </h2>
+              </div>
+              <div id="belief-list" class="stack-list"></div>
+            </section>
+          </div>
+
+          <!-- 6. NAMES PANEL -->
+          <div id="tab-pane-names" class="tab-pane" data-tab-pane="names">
+            <section id="panel-names" class="panel-section">
+              <div class="panel-header">
+                <h2 class="panel-title">Agent Object Names (<span id="names-count">0</span>)</h2>
+              </div>
+              <div class="control-block">
+                <div class="muted-note">
+                  Words the agent uses for objects (extracted from <code>speak</code>, thoughts, and beliefs) mapped to internal IDs.
+                </div>
+              </div>
+              <div id="names-list" class="stack-list"></div>
+            </section>
+          </div>
         </aside>
       </main>
     </div>

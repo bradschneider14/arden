@@ -1,6 +1,7 @@
 """FastAPI server, simulation service, creator API, WebSocket stream, and auth."""
 
 from arden.server.app import (
+    FIRST_RUN_PRESETS,
     LOCAL_HOSTS,
     SCHEMA_VERSION,
     WS_SCHEMA_VERSION,
@@ -8,7 +9,9 @@ from arden.server.app import (
     SimulationService,
     build_app,
     create_app,
+    extract_object_names,
     get_app,
+    get_spawn_presets,
     is_local_host,
     make_app,
     resolve_creator_token,
@@ -18,6 +21,7 @@ from arden.server.app import (
 )
 
 __all__ = [
+    "FIRST_RUN_PRESETS",
     "LOCAL_HOSTS",
     "SCHEMA_VERSION",
     "WS_SCHEMA_VERSION",
@@ -25,7 +29,9 @@ __all__ = [
     "SimulationService",
     "build_app",
     "create_app",
+    "extract_object_names",
     "get_app",
+    "get_spawn_presets",
     "is_local_host",
     "make_app",
     "resolve_creator_token",

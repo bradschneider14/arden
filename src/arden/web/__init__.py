@@ -6,6 +6,7 @@ import mimetypes
 from pathlib import Path
 
 from arden.server import (
+    FIRST_RUN_PRESETS,
     LOCAL_HOSTS,
     SCHEMA_VERSION,
     WS_SCHEMA_VERSION,
@@ -13,7 +14,9 @@ from arden.server import (
     SimulationService,
     build_app,
     create_app,
+    extract_object_names,
     get_app,
+    get_spawn_presets,
     is_local_host,
     make_app,
     resolve_creator_token,
@@ -38,6 +41,7 @@ def get_static_dir() -> Path:
 
 
 __all__ = [
+    "FIRST_RUN_PRESETS",
     "LOCAL_HOSTS",
     "SCHEMA_VERSION",
     "STATIC_DIR",
@@ -46,7 +50,9 @@ __all__ = [
     "SimulationService",
     "build_app",
     "create_app",
+    "extract_object_names",
     "get_app",
+    "get_spawn_presets",
     "get_static_dir",
     "is_local_host",
     "make_app",

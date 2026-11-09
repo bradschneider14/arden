@@ -1,10 +1,366 @@
 /**
- * World state store and incremental WebSocket delta reducer for the Arden browser client.
+ * World state store, incremental WebSocket delta reducer, live timeline reducer,
+ * and client-side object name extractor for the Arden browser console.
  */
 
 export const DEFAULT_WORLD_WIDTH = 16;
 export const DEFAULT_WORLD_HEIGHT = 16;
 export const DEFAULT_TILE_SIZE = 1.0;
+export const MAX_TIMELINE_ENTRIES = 250;
+
+export const FIRST_RUN_PRESETS = [
+  {
+    key: "ball",
+    title: "Red Ball",
+    creator_label: "ball",
+    shape: "sphere",
+    color: "red",
+    height: 0.25,
+    volume: 0.01,
+    weight: 0.4,
+    rigidity: 0.6,
+    hollow: false,
+    binding: false,
+    fragile: false,
+    fixed: false,
+  },
+  {
+    key: "stick",
+    title: "Long Stick",
+    creator_label: "stick",
+    shape: "long",
+    color: "brown",
+    height: 1.3,
+    volume: 0.008,
+    weight: 0.6,
+    rigidity: 0.85,
+    hollow: false,
+    binding: false,
+    fragile: false,
+    fixed: false,
+  },
+  {
+    key: "flat_stone",
+    title: "Heavy Flat Stone",
+    creator_label: "flat_stone",
+    shape: "flat",
+    color: "gray",
+    height: 0.35,
+    volume: 0.08,
+    weight: 18.0,
+    rigidity: 1.0,
+    hollow: false,
+    binding: false,
+    fragile: false,
+    fixed: false,
+  },
+  {
+    key: "vine",
+    title: "Binding Vine",
+    creator_label: "vine",
+    shape: "long",
+    color: "green",
+    height: 1.5,
+    volume: 0.004,
+    weight: 0.25,
+    rigidity: 0.1,
+    hollow: false,
+    binding: true,
+    fragile: false,
+    fixed: false,
+  },
+  {
+    key: "leaf",
+    title: "Light Leaf",
+    creator_label: "leaf",
+    shape: "flat",
+    color: "green",
+    height: 0.02,
+    volume: 0.0005,
+    weight: 0.02,
+    rigidity: 0.15,
+    hollow: false,
+    binding: false,
+    fragile: false,
+    fixed: false,
+  },
+  {
+    key: "berry",
+    title: "Fragile Berry",
+    creator_label: "berry",
+    shape: "sphere",
+    color: "red",
+    height: 0.05,
+    volume: 0.0002,
+    weight: 0.03,
+    rigidity: 0.2,
+    hollow: false,
+    binding: false,
+    fragile: true,
+    fixed: false,
+  },
+  {
+    key: "berry_bush",
+    title: "Berry Bush",
+    creator_label: "berry_bush",
+    shape: "sphere",
+    color: "green",
+    height: 0.9,
+    volume: 0.6,
+    weight: 25.0,
+    rigidity: 0.5,
+    hollow: false,
+    binding: false,
+    fragile: false,
+    fixed: true,
+  },
+  {
+    key: "hollow_log",
+    title: "Hollow Log",
+    creator_label: "hollow_log",
+    shape: "cylinder",
+    color: "brown",
+    height: 0.5,
+    volume: 0.4,
+    weight: 35.0,
+    rigidity: 0.9,
+    hollow: true,
+    binding: false,
+    fragile: false,
+    fixed: false,
+  },
+  {
+    key: "large_tree",
+    title: "Large Tree",
+    creator_label: "large_tree",
+    shape: "cylinder",
+    color: "brown",
+    height: 3.5,
+    volume: 2.5,
+    weight: 500.0,
+    rigidity: 1.0,
+    hollow: false,
+    binding: false,
+    fragile: false,
+    fixed: true,
+  },
+  {
+    key: "mailbox",
+    title: "Mailbox Container",
+    creator_label: "mailbox",
+    shape: "cube",
+    color: "blue",
+    height: 0.6,
+    volume: 0.12,
+    weight: 12.0,
+    rigidity: 0.95,
+    hollow: true,
+    binding: false,
+    fragile: false,
+    fixed: true,
+  },
+];
+
+const NAME_STOPWORDS = new Set([
+  "the", "a", "an", "this", "that", "these", "those", "it", "its", "is", "are",
+  "was", "were", "be", "been", "being", "to", "of", "in", "on", "at", "by",
+  "for", "with", "from", "into", "onto", "near", "toward", "towards", "and",
+  "or", "but", "if", "then", "so", "as", "my", "me", "i", "we", "you", "they",
+  "them", "he", "she", "him", "her", "can", "will", "would", "could", "should",
+  "may", "might", "must", "have", "has", "had", "do", "does", "did", "not",
+  "no", "yes", "up", "down", "out", "over", "under", "again", "now", "here",
+  "there", "where", "when", "why", "how", "what", "which", "who", "all", "any",
+  "some", "more", "most", "other", "such", "only", "own", "same", "than", "too",
+  "very", "just", "also", "still", "even", "back", "after", "before", "while",
+  "about", "around", "between", "through", "during", "above", "below", "top",
+  "inside", "outside", "ground", "raised", "level", "object", "objects",
+  "move", "walk", "run", "pick", "drop", "throw", "push", "pull", "climb",
+  "open", "close", "use", "combine", "look", "inspect", "listen", "touch",
+  "wait", "rest", "speak", "held", "holding", "hand", "hands", "position",
+  "meter", "meters", "north", "south", "east", "west", "left", "right",
+  "seems", "looks", "feels", "appears", "like", "very", "quite", "rather",
+  "maybe", "perhaps", "think", "believe", "want", "need", "try", "going",
+]);
+
+/**
+ * Extract `{ object_id, word, source, context, tick }` candidate name pairs from a text string.
+ */
+export function extractNamesFromText(text, source = "thought", tick = 0) {
+  if (!text || typeof text !== "string" || !text.includes("object_")) {
+    return [];
+  }
+  const results = [];
+  const cleanPhrase = (phrase) => {
+    const tokens = (String(phrase).toLowerCase().match(/[a-z][a-z0-9_-]{1,24}/g) || []).filter(
+      (t) => !t.startsWith("object_") && !NAME_STOPWORDS.has(t)
+    );
+    if (tokens.length === 0) return "";
+    return tokens.slice(-2).join(" ");
+  };
+
+  // 1. Parenthetical before object_<n>: "red ball (object_1)"
+  const beforeParen = /([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*){0,2})\s*\(\s*(object_\d+)\s*\)/g;
+  for (const m of text.matchAll(beforeParen)) {
+    const word = cleanPhrase(m[1]);
+    if (word) {
+      results.push({ object_id: m[2], word, source, context: text, tick });
+    }
+  }
+
+  // 2. Parenthetical after object_<n>: "object_1 (the red ball)"
+  const afterParen = /\b(object_\d+)\s*\(\s*([^)]{2,32})\s*\)/g;
+  for (const m of text.matchAll(afterParen)) {
+    const word = cleanPhrase(m[2]);
+    if (word) {
+      results.push({ object_id: m[1], word, source, context: text, tick });
+    }
+  }
+
+  // 3. Explicit naming/copula: "object_1 is a red ball", "call object_1 the berry"
+  const copula = /\b(object_\d+)\s+(?:is|looks\s+like|as)\s+(?:a|an|the)?\s*([a-zA-Z][a-zA-Z0-9_-]*(?:\s+[a-zA-Z][a-zA-Z0-9_-]*)?)/gi;
+  for (const m of text.matchAll(copula)) {
+    const word = cleanPhrase(m[2]);
+    if (word) {
+      results.push({ object_id: m[1], word, source, context: text, tick });
+    }
+  }
+
+  // 4. Fallback nearby descriptive words in same clause as object_<n>
+  if (results.length === 0) {
+    const objMatches = [...text.matchAll(/\b(object_\d+)\b/g)];
+    for (const m of objMatches) {
+      const oid = m[1];
+      const idx = m.index || 0;
+      const start = Math.max(0, idx - 45);
+      const end = Math.min(text.length, idx + oid.length + 45);
+      const windowStr = text.slice(start, end);
+      const tokens = (windowStr.toLowerCase().match(/[a-z][a-z0-9_-]{2,20}/g) || []).filter(
+        (t) => !t.startsWith("object_") && !NAME_STOPWORDS.has(t)
+      );
+      for (const tok of tokens.slice(0, 2)) {
+        results.push({ object_id: oid, word: tok, source, context: text, tick });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Merge newly extracted `{ object_id, word, source, context, tick }` entries into `state.names`.
+ */
+export function mergeNamesIntoState(state, text, source = "thought", tick = 0) {
+  const candidates = extractNamesFromText(text, source, tick);
+  if (candidates.length === 0) return;
+
+  if (!state.names || typeof state.names !== "object") {
+    state.names = { by_object: {}, mappings: [], word_to_objects: {} };
+  }
+  const byObject = state.names.by_object || {};
+  const mappings = Array.isArray(state.names.mappings) ? state.names.mappings : [];
+  const wordToObjects = state.names.word_to_objects || {};
+
+  for (const item of candidates) {
+    const { object_id: oid, word, source: src, context, tick: t } = item;
+    if (!byObject[oid]) {
+      byObject[oid] = {
+        object_id: oid,
+        creator_label: getObjectLabel(state, oid),
+        primary_name: word,
+        words: [],
+        sources: [],
+        mentions: 0,
+      };
+    }
+    const objEntry = byObject[oid];
+    if (!objEntry.creator_label) {
+      objEntry.creator_label = getObjectLabel(state, oid);
+    }
+    if (!objEntry.words.includes(word)) {
+      objEntry.words.push(word);
+    }
+    if (!objEntry.sources.includes(src)) {
+      objEntry.sources.push(src);
+    }
+    objEntry.mentions = (objEntry.mentions || 0) + 1;
+    if (!objEntry.primary_name) {
+      objEntry.primary_name = word;
+    }
+
+    let existingMapping = mappings.find((m) => m.object_id === oid && m.word === word);
+    if (!existingMapping) {
+      existingMapping = {
+        object_id: oid,
+        word,
+        count: 1,
+        sources: [src],
+        creator_label: getObjectLabel(state, oid),
+        last_tick: t,
+        example: context,
+      };
+      mappings.push(existingMapping);
+    } else {
+      existingMapping.count = (existingMapping.count || 1) + 1;
+      if (!existingMapping.sources.includes(src)) {
+        existingMapping.sources.push(src);
+      }
+      existingMapping.last_tick = Math.max(existingMapping.last_tick || 0, t);
+    }
+
+    if (!wordToObjects[word]) {
+      wordToObjects[word] = [oid];
+    } else if (!wordToObjects[word].includes(oid)) {
+      wordToObjects[word].push(oid);
+    }
+  }
+
+  state.names = {
+    by_object: byObject,
+    mappings,
+    word_to_objects: wordToObjects,
+  };
+}
+
+/**
+ * Append an entry to `state.timeline` if not already duplicated at the tail.
+ */
+export function appendTimelineEntry(state, entry) {
+  if (!entry || typeof entry !== "object") return;
+  if (!Array.isArray(state.timeline)) {
+    state.timeline = [];
+  }
+  const normalized = {
+    id: entry.id || `${state.timeline.length + 1}_${entry.kind}_${entry.tick ?? state.tick}`,
+    tick: Number(entry.tick ?? state.tick ?? 0),
+    kind: String(entry.kind || "action"),
+    summary: String(entry.summary || ""),
+    details: entry.details && typeof entry.details === "object" ? entry.details : {},
+  };
+  const last = state.timeline[state.timeline.length - 1];
+  if (
+    last &&
+    last.tick === normalized.tick &&
+    last.kind === normalized.kind &&
+    last.summary === normalized.summary
+  ) {
+    return;
+  }
+  state.timeline.push(normalized);
+  if (state.timeline.length > MAX_TIMELINE_ENTRIES) {
+    state.timeline.splice(0, state.timeline.length - MAX_TIMELINE_ENTRIES);
+  }
+}
+
+/**
+ * Filter timeline entries by kind (`all` | `thought` | `intent` | `wake` | `action`).
+ */
+export function filterTimelineEntries(entries = [], kindFilter = "all") {
+  if (!Array.isArray(entries)) return [];
+  const norm = String(kindFilter || "all").toLowerCase().trim();
+  if (!norm || norm === "all") return entries;
+  const singular = norm.endsWith("s") ? norm.slice(0, -1) : norm;
+  return entries.filter((item) => String(item?.kind || "").toLowerCase() === singular);
+}
 
 /**
  * Compute approximate light level from time_of_day fraction [0..1) when explicit
@@ -154,6 +510,14 @@ export function createInitialState() {
     reconnectAttempt: 0,
     deltaCount: 0,
     lastEvent: null,
+    auth: {
+      token: null,
+      spectatorMode: false,
+      authenticated: true,
+      authRequired: false,
+      lastAuthError: null,
+    },
+    presets: [...FIRST_RUN_PRESETS],
     terrain: {
       width: DEFAULT_WORLD_WIDTH,
       height: DEFAULT_WORLD_HEIGHT,
@@ -187,6 +551,7 @@ export function createInitialState() {
       remaining_ticks: 0,
       paused: false,
       wind_direction: { x: 1.0, y: 0.0 },
+      scheduled: [],
     },
     agent: {
       goal: null,
@@ -196,6 +561,31 @@ export function createInitialState() {
       drives: { boredom: 0.0, curiosity: 0.0 },
       lastWake: null,
       lastSpoke: null,
+    },
+    inbox: {
+      messages: [],
+      logs: [],
+      creator_note: null,
+      count: 0,
+    },
+    timeline: [],
+    timelineFilter: "all",
+    beliefs: {
+      items: [],
+      max_beliefs: 32,
+    },
+    selfModel: {
+      text: "",
+      version: 0,
+      updated_tick: 0,
+      word_count: 0,
+      max_words: 80,
+      history: [],
+    },
+    names: {
+      by_object: {},
+      mappings: [],
+      word_to_objects: {},
     },
     selectedObjectId: null,
     hoveredTarget: null,
@@ -288,6 +678,9 @@ export function applySnapshot(state, snapshot) {
         x: Number(w.wind_direction?.x ?? snapshot.weather.wind_direction?.x ?? 1.0),
         y: Number(w.wind_direction?.y ?? snapshot.weather.wind_direction?.y ?? 0.0),
       },
+      scheduled: Array.isArray(snapshot.weather.scheduled)
+        ? snapshot.weather.scheduled
+        : state.weather.scheduled || [],
     };
   }
 
@@ -442,10 +835,44 @@ export function applyWorldDelta(state, msg) {
   }
 
   if (eventType === "spoke" && (delta.text || msg.text)) {
+    const spokenText = String(delta.text || msg.text);
     state.agent.lastSpoke = {
       tick: state.tick,
-      text: String(delta.text || msg.text),
+      text: spokenText,
     };
+    appendTimelineEntry(state, {
+      tick: state.tick,
+      kind: "action",
+      summary: `speak: "${spokenText}"`,
+      details: { verb: "speak", text: spokenText },
+    });
+    mergeNamesIntoState(state, spokenText, "speak", state.tick);
+  }
+
+  // Embedded agent_action on tick deltas
+  const agentAction = delta.agent_action || msg.agent_action;
+  if (agentAction && typeof agentAction === "object" && agentAction.verb) {
+    const verb = String(agentAction.verb);
+    if (verb !== "speak") {
+      appendTimelineEntry(state, {
+        tick: state.tick,
+        kind: "action",
+        summary: String(agentAction.summary || verb),
+        details: agentAction,
+      });
+    }
+  }
+
+  // Record notable creator/world actions in timeline
+  if (msg.type === "creator_action" && msg.action) {
+    const act = String(msg.action);
+    const oid = msg.object_id || msg.object?.id || "";
+    appendTimelineEntry(state, {
+      tick: state.tick,
+      kind: "action",
+      summary: oid ? `creator ${act} (${oid})` : `creator ${act}`,
+      details: msg,
+    });
   }
 
   state.deltaCount += 1;
@@ -477,25 +904,68 @@ export function applyWsMessage(state, msg) {
     state.agent.intent = msg.intent || null;
     if (msg.goal !== undefined) state.agent.goal = msg.goal;
     if (msg.thought !== undefined) state.agent.thought = msg.thought;
+    const kind = String(msg.intent?.kind || "intent");
+    const target = msg.intent?.target_id || msg.intent?.text || "";
+    const summary = target ? `${kind} -> ${target}` : kind;
+    appendTimelineEntry(state, {
+      tick: state.tick,
+      kind: "intent",
+      summary,
+      details: { intent: msg.intent, goal: msg.goal },
+    });
+    if (msg.goal) {
+      mergeNamesIntoState(state, String(msg.goal), "thought", state.tick);
+    }
     state.lastEvent = { type: "intent", event: "intent_set", tick: state.tick };
     return state;
   }
   if (msgType === "thought") {
     if (typeof msg.tick === "number") state.tick = msg.tick;
-    if (msg.thought !== undefined || msg.text !== undefined) {
-      state.agent.thought = msg.thought ?? msg.text;
+    const thoughtText = msg.thought ?? msg.text ?? "";
+    if (thoughtText !== undefined) {
+      state.agent.thought = thoughtText;
     }
     if (msg.goal !== undefined) state.agent.goal = msg.goal;
+    if (thoughtText) {
+      appendTimelineEntry(state, {
+        tick: state.tick,
+        kind: "thought",
+        summary: String(thoughtText),
+        details: { thought: thoughtText, goal: msg.goal },
+      });
+      mergeNamesIntoState(state, String(thoughtText), "thought", state.tick);
+    }
     state.lastEvent = { type: "thought", event: "thought", tick: state.tick };
     return state;
   }
   if (msgType === "wake") {
     if (typeof msg.tick === "number") state.tick = msg.tick;
+    const reasons = Array.isArray(msg.reasons) ? msg.reasons : [];
     state.agent.lastWake = {
       tick: state.tick,
-      reasons: Array.isArray(msg.reasons) ? msg.reasons : [],
+      reasons,
     };
+    const reasonText = reasons
+      .map((r) => (typeof r === "object" ? r.reason || r.kind || "event" : String(r)))
+      .join(", ");
+    appendTimelineEntry(state, {
+      tick: state.tick,
+      kind: "wake",
+      summary: `Wake: ${reasonText || "scheduled"}`,
+      details: { reasons },
+    });
     state.lastEvent = { type: "wake", event: "wake", tick: state.tick };
+    return state;
+  }
+  if (msgType === "reflection") {
+    if (typeof msg.tick === "number") state.tick = msg.tick;
+    appendTimelineEntry(state, {
+      tick: state.tick,
+      kind: "thought",
+      summary: `Reflection (${msg.trigger || "cycle"})`,
+      details: msg,
+    });
+    state.lastEvent = { type: "reflection", event: "reflection", tick: state.tick };
     return state;
   }
   if (msgType === "gate_decision") {
@@ -592,6 +1062,20 @@ export function createWorldStore() {
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
+    setAuthState(authPatch) {
+      if (!authPatch || typeof authPatch !== "object") return;
+      state.auth = {
+        ...state.auth,
+        ...authPatch,
+      };
+      notify("auth");
+    },
+    setPresetsPayload(payload) {
+      if (payload && Array.isArray(payload.presets) && payload.presets.length > 0) {
+        state.presets = payload.presets;
+        notify("presets");
+      }
+    },
     setSnapshot(snapshot) {
       applySnapshot(state, snapshot);
       notify("snapshot");
@@ -618,6 +1102,78 @@ export function createWorldStore() {
         state.agent.drives = { ...state.agent.drives, ...agentPayload.drives };
       }
       notify("agent");
+    },
+    setInboxPayload(inboxPayload) {
+      if (!inboxPayload || typeof inboxPayload !== "object") return;
+      state.inbox = {
+        messages: Array.isArray(inboxPayload.messages) ? inboxPayload.messages : [],
+        logs: Array.isArray(inboxPayload.logs) ? inboxPayload.logs : [],
+        creator_note: inboxPayload.creator_note ?? null,
+        count: Number(inboxPayload.count ?? (inboxPayload.messages?.length || 0)),
+      };
+      notify("inbox");
+    },
+    setBeliefsPayload(beliefsPayload) {
+      if (!beliefsPayload || typeof beliefsPayload !== "object") return;
+      const items = Array.isArray(beliefsPayload.beliefs) ? beliefsPayload.beliefs : [];
+      state.beliefs = {
+        items,
+        max_beliefs: Number(beliefsPayload.max_beliefs || 32),
+      };
+      for (const b of items) {
+        if (b && b.statement) {
+          mergeNamesIntoState(state, String(b.statement), "belief", Number(b.updated_tick || 0));
+        }
+      }
+      notify("beliefs");
+    },
+    setSelfModelPayload(selfModelPayload) {
+      if (!selfModelPayload || typeof selfModelPayload !== "object") return;
+      const sm = selfModelPayload.self_model || selfModelPayload;
+      state.selfModel = {
+        text: String(sm.text || ""),
+        version: Number(sm.version || 0),
+        updated_tick: Number(sm.updated_tick || 0),
+        word_count: Number(sm.word_count || 0),
+        max_words: Number(selfModelPayload.max_words || 80),
+        history: Array.isArray(selfModelPayload.history) ? selfModelPayload.history : [],
+      };
+      notify("self_model");
+    },
+    setTimelinePayload(timelinePayload) {
+      if (!timelinePayload || typeof timelinePayload !== "object") return;
+      if (Array.isArray(timelinePayload.entries)) {
+        state.timeline = timelinePayload.entries.slice(-MAX_TIMELINE_ENTRIES);
+        notify("timeline");
+      }
+    },
+    setTimelineFilter(kind) {
+      state.timelineFilter = String(kind || "all").toLowerCase();
+      notify("timeline_filter");
+    },
+    setNamesPayload(namesPayload) {
+      if (!namesPayload || typeof namesPayload !== "object") return;
+      state.names = {
+        by_object: namesPayload.by_object || {},
+        mappings: Array.isArray(namesPayload.mappings) ? namesPayload.mappings : [],
+        word_to_objects: namesPayload.word_to_objects || {},
+      };
+      notify("names");
+    },
+    setWeatherPayload(weatherPayload) {
+      if (!weatherPayload || typeof weatherPayload !== "object") return;
+      const w = weatherPayload.current || weatherPayload;
+      state.weather = {
+        ...state.weather,
+        type: String(w.type ?? w.weather_type ?? state.weather.type ?? "clear"),
+        intensity: Number(w.intensity ?? state.weather.intensity ?? 0),
+        duration: Number(w.duration ?? state.weather.duration ?? 0),
+        remaining_ticks: Number(w.remaining_ticks ?? state.weather.remaining_ticks ?? 0),
+        paused: Boolean(weatherPayload.paused ?? w.paused ?? state.weather.paused),
+        wind_direction: w.wind_direction || state.weather.wind_direction,
+        scheduled: Array.isArray(weatherPayload.scheduled) ? weatherPayload.scheduled : [],
+      };
+      notify("weather");
     },
     applyMessage(msg) {
       applyWsMessage(state, msg);
