@@ -763,6 +763,50 @@ def _sanitize_world_event(
     )
 
 
+def _emit_perception_event(world: World, percept: Percept) -> None:
+    bus = getattr(world, "events", None)
+    if bus is None:
+        return
+    from arden.world.world import PerceptionEvent
+
+    obj_ids: list[str] = []
+    seen: set[str] = set()
+    for o in percept.objects:
+        if o.id not in seen:
+            seen.add(o.id)
+            obj_ids.append(o.id)
+    for o in percept.appeared:
+        if o.id not in seen:
+            seen.add(o.id)
+            obj_ids.append(o.id)
+    for oid in percept.disappeared:
+        if oid not in seen:
+            seen.add(oid)
+            obj_ids.append(oid)
+    for o in percept.moved:
+        if o.id not in seen:
+            seen.add(o.id)
+            obj_ids.append(o.id)
+    for o in percept.changed:
+        if o.id not in seen:
+            seen.add(o.id)
+            obj_ids.append(o.id)
+    for ev in percept.events:
+        if ev.object_id and ev.object_id not in seen:
+            seen.add(ev.object_id)
+            obj_ids.append(ev.object_id)
+
+    bus.emit(
+        PerceptionEvent(
+            tick=world.tick,
+            source="perception",
+            percept=percept.to_dict(),
+            object_ids=obj_ids,
+            is_delta=percept.is_delta,
+        )
+    )
+
+
 def perceive(
     world: World,
     body: AgentBody | Mapping[str, Any] | None = None,
@@ -773,6 +817,7 @@ def perceive(
     color_visibility_threshold: float | None = None,
     config: Settings | PerceptionSettings | Mapping[str, Any] | None = None,
     events: Iterable[WorldEvent | PerceivedEvent | Mapping[str, Any]] | None = None,
+    _emit_event: bool = True,
 ) -> Percept:
     """Turn ``world`` and ``body`` state into a structured ``Percept``.
 
@@ -894,7 +939,7 @@ def perceive(
         holding=agent_body.holding,
     )
 
-    return Percept(
+    result = Percept(
         tick=world.tick,
         light=coarse_light,
         body=body_percept,
@@ -903,6 +948,9 @@ def perceive(
         affordances=affordances,
         is_delta=False,
     )
+    if _emit_event:
+        _emit_perception_event(world, result)
+    return result
 
 
 def look(
@@ -1021,6 +1069,7 @@ class PerceptionTracker:
         body: AgentBody | Mapping[str, Any] | None = None,
         *,
         visibility_factor: float | None = None,
+        _emit_event: bool = True,
     ) -> Percept:
         """Return a complete (non-delta) ``Percept`` and update the tracker baseline."""
         w = self._resolve_world(world)
@@ -1036,6 +1085,7 @@ class PerceptionTracker:
             reach_radius=self.reach_radius,
             color_visibility_threshold=self.color_visibility_threshold,
             config=self.config,
+            _emit_event=_emit_event,
         )
         self._known_objects = {obj.id: obj.model_copy(deep=True) for obj in full.objects}
         self._last_body = full.body.model_copy(deep=True)
@@ -1066,6 +1116,7 @@ class PerceptionTracker:
         body: AgentBody | Mapping[str, Any] | None = None,
         *,
         visibility_factor: float | None = None,
+        _emit_event: bool = True,
     ) -> Percept:
         """Compute only what appeared, disappeared, moved beyond threshold, or changed since the last call."""
         w = self._resolve_world(world)
@@ -1093,6 +1144,7 @@ class PerceptionTracker:
             color_visibility_threshold=cfg.color_visibility_threshold,
             config=self.config,
             events=(),
+            _emit_event=False,
         )
         current_by_id = {obj.id: obj for obj in current.objects}
 
@@ -1239,6 +1291,8 @@ class PerceptionTracker:
             changed=changed,
         )
         result._empty_delta = is_completely_empty
+        if _emit_event:
+            _emit_perception_event(w, result)
         return result
 
     def __call__(

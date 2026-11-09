@@ -2795,6 +2795,127 @@ def execute_action(
     return ActionResult(ok=False, reason=NOTHING_HAPPENED)
 
 
+_VERB_CALL_DEPTH: int = 0
+
+
+def _emit_direct_verb_result(
+    verb_name: str,
+    res: ActionResult,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+) -> None:
+    world_obj: World | None = None
+    for a in args:
+        if isinstance(a, World):
+            world_obj = a
+            break
+    if world_obj is None and isinstance(kwargs.get("world"), World):
+        world_obj = kwargs["world"]
+    if world_obj is None:
+        world_obj = _get_active_world()
+    if world_obj is None or getattr(world_obj, "_in_controller_tick", False):
+        return
+    bus = getattr(world_obj, "events", None)
+    if bus is None:
+        return
+
+    from arden.world.world import ActionResultEvent
+
+    target_str: str | None = None
+    for a in args:
+        if isinstance(a, str) and _OBJECT_ID.fullmatch(a):
+            target_str = a
+            break
+        if isinstance(a, WorldObject):
+            target_str = a.id
+            break
+    if target_str is None:
+        raw_t = kwargs.get("target")
+        if isinstance(raw_t, str) and _OBJECT_ID.fullmatch(raw_t):
+            target_str = raw_t
+        elif isinstance(raw_t, WorldObject):
+            target_str = raw_t.id
+
+    obj_id = (
+        target_str
+        if target_str is not None and _OBJECT_ID.fullmatch(target_str)
+        else (res.id if res.id and _OBJECT_ID.fullmatch(res.id) else None)
+    )
+    clean_data: dict[str, Any] = {}
+    for k, v in (res.data or {}).items():
+        if hasattr(v, "model_dump"):
+            clean_data[k] = v.model_dump(mode="json")
+        elif isinstance(v, list):
+            clean_data[k] = [
+                x.model_dump(mode="json") if hasattr(x, "model_dump") else x
+                for x in v
+            ]
+        else:
+            clean_data[k] = v
+    clean_events = [
+        ev.model_dump(mode="json") if hasattr(ev, "model_dump") else ev
+        for ev in (res.events or [])
+    ]
+    bus.emit(
+        ActionResultEvent(
+            tick=world_obj.tick,
+            source="agent",
+            verb=verb_name,
+            target=target_str,
+            object_id=obj_id,
+            ok=res.ok,
+            reason=res.reason,
+            events=clean_events,
+            data=clean_data,
+            result=res,
+        )
+    )
+
+
+def _wrap_verb_with_event(verb_name: str, fn: Callable[..., ActionResult]) -> Callable[..., ActionResult]:
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapped(*args: Any, **kwargs: Any) -> ActionResult:
+        global _VERB_CALL_DEPTH
+        _VERB_CALL_DEPTH += 1
+        try:
+            res = fn(*args, **kwargs)
+        finally:
+            _VERB_CALL_DEPTH -= 1
+        if _VERB_CALL_DEPTH == 0 and isinstance(res, ActionResult):
+            eff_verb = verb_name
+            if verb_name in ("invoke_opaque_action", "execute_action"):
+                for a in args:
+                    if isinstance(a, str) and (_OPAQUE_ACTION_ID.fullmatch(a) or a in ("move", "look", "push", "strike", "grab", "drop", "place", "stack", "bind", "insert", "separate", "eat", "rest", "speak")):
+                        eff_verb = a
+                        break
+            _emit_direct_verb_result(eff_verb, res, args, kwargs)
+        return res
+
+    return _wrapped
+
+
+move = _wrap_verb_with_event("move", move)
+look = _wrap_verb_with_event("look", look)
+push = _wrap_verb_with_event("push", push)
+strike = _wrap_verb_with_event("strike", strike)
+grab = _wrap_verb_with_event("grab", grab)
+drop = _wrap_verb_with_event("drop", drop)
+place = _wrap_verb_with_event("place", place)
+stack = _wrap_verb_with_event("stack", stack)
+bind = _wrap_verb_with_event("bind", bind)
+insert = _wrap_verb_with_event("insert", insert)
+separate = _wrap_verb_with_event("separate", separate)
+eat = _wrap_verb_with_event("eat", eat)
+rest = _wrap_verb_with_event("rest", rest)
+speak = _wrap_verb_with_event("speak", speak)
+invoke_opaque_action = _wrap_verb_with_event("invoke_opaque_action", invoke_opaque_action)
+execute_opaque_action = invoke_opaque_action
+run_opaque_action = invoke_opaque_action
+execute_action = _wrap_verb_with_event("execute_action", execute_action)
+
+
 __all__ = [
     "DEFAULT_FRAGILE_BREAK_THRESHOLD",
     "DEFAULT_REACH",

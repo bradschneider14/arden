@@ -1181,6 +1181,53 @@ class Controller:
         world.events.emit(event)
         return event
 
+    def _emit_action_result(
+        self,
+        world: World,
+        *,
+        step: Step,
+        result: ActionResult,
+    ) -> None:
+        from arden.world.world import ActionResultEvent
+
+        target_str = step.target if isinstance(step.target, str) else None
+        params_dict = dict(step.params or {})
+        obj_id = (
+            target_str
+            if target_str is not None and _OBJECT_ID_RE.fullmatch(target_str)
+            else (result.id if result.id and _OBJECT_ID_RE.fullmatch(result.id) else None)
+        )
+        clean_data: dict[str, Any] = {}
+        for k, v in (result.data or {}).items():
+            if hasattr(v, "model_dump"):
+                clean_data[k] = v.model_dump(mode="json")
+            elif isinstance(v, list):
+                clean_data[k] = [
+                    x.model_dump(mode="json") if hasattr(x, "model_dump") else x
+                    for x in v
+                ]
+            else:
+                clean_data[k] = v
+        clean_events = [
+            ev.model_dump(mode="json") if hasattr(ev, "model_dump") else ev
+            for ev in (result.events or [])
+        ]
+        ev = ActionResultEvent(
+            tick=world.tick,
+            source="agent",
+            verb=step.verb,
+            target=target_str,
+            object_id=obj_id,
+            params=params_dict,
+            ok=result.ok,
+            reason=result.reason,
+            events=clean_events,
+            data=clean_data,
+            result=result,
+        )
+        self.events.emit(ev)
+        world.events.emit(ev)
+
     def _finish_intent(
         self,
         world: World,
@@ -1194,7 +1241,7 @@ class Controller:
     ) -> ControllerStatus:
         assert self._intent is not None
         finished_intent = self._intent
-        obs = perceive(world)
+        obs = perceive(world, _emit_event=False)
         event = self._emit_intent_ended(
             world,
             status=status,
@@ -1244,6 +1291,9 @@ class Controller:
         result: ActionResult | None = None,
     ) -> ControllerStatus:
         """Retry a failed step at most ``self.max_retries`` times, then fail the intent."""
+        if result is not None and not getattr(self, "_action_emitted_for_tick", False):
+            self._action_emitted_for_tick = True
+            self._emit_action_result(world, step=step, result=result)
         self._waypoints = None
         if self._step_retries < self.max_retries:
             self._step_retries += 1
@@ -1274,6 +1324,9 @@ class Controller:
         result: ActionResult | None = None,
     ) -> ControllerStatus:
         """Advance to the next step or finish with ``succeeded`` when all steps complete."""
+        if result is not None and not getattr(self, "_action_emitted_for_tick", False):
+            self._action_emitted_for_tick = True
+            self._emit_action_result(world, step=completed_step, result=result)
         assert self._intent is not None
         completed_idx = self._step_index
         completed_retries = self._step_retries
@@ -1309,7 +1362,11 @@ class Controller:
             raise RuntimeError("Controller.tick requires a World instance")
 
         if self._intent is None:
-            rest_res = action_verbs.rest(resolved_world, 1)
+            setattr(resolved_world, "_in_controller_tick", True)
+            try:
+                rest_res = action_verbs.rest(resolved_world, 1)
+            finally:
+                setattr(resolved_world, "_in_controller_tick", False)
             self._last_status = ControllerStatus.idle(result=rest_res)
             return self._last_status
 
@@ -1319,10 +1376,23 @@ class Controller:
         step = self._intent.steps[self._step_index]
         verb_name = step.verb.strip().lower()
 
-        if verb_name == "move":
-            return self._tick_move_step(resolved_world, step)
+        self._action_emitted_for_tick = False
+        setattr(resolved_world, "_in_controller_tick", True)
+        try:
+            if verb_name == "move":
+                status_out = self._tick_move_step(resolved_world, step)
+                if status_out.result is not None and not self._action_emitted_for_tick:
+                    self._action_emitted_for_tick = True
+                    self._emit_action_result(resolved_world, step=step, result=status_out.result)
+                return status_out
 
-        res = self._execute_action_step(resolved_world, step)
+            res = self._execute_action_step(resolved_world, step)
+            if not self._action_emitted_for_tick:
+                self._action_emitted_for_tick = True
+                self._emit_action_result(resolved_world, step=step, result=res)
+        finally:
+            setattr(resolved_world, "_in_controller_tick", False)
+
         if res.ok:
             return self._advance_step(resolved_world, step, result=res)
 

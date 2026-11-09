@@ -1304,6 +1304,7 @@ class MailboxManager:
             object_id=letter.id,
             arrival_kind="reply",
             position=mb.position.model_copy(),
+            object=letter.model_dump(mode="json"),
         )
         self.arrivals.append(mail_event)
         self.world.events.emit(mail_event)
@@ -1423,6 +1424,7 @@ class MailboxManager:
             object_id=spawned.id,
             arrival_kind="spawn_in_response",
             position=mb.position.model_copy(),
+            object=spawned.model_dump(mode="json"),
         )
         self.arrivals.append(mail_event)
         self.world.events.emit(mail_event)

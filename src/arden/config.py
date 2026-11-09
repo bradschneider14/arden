@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import random
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -310,6 +312,32 @@ class LoggingSettings(BaseModel):
         return normalized
 
 
+class ObserverConfig(BaseModel):
+    """Append-only observer log settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runs_dir: Path = Field(default=Path("data/runs"))
+    max_bytes: int = Field(default=1_048_576, gt=0)
+    enabled: bool = Field(default=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_aliases(cls, values: Any) -> Any:
+        if not isinstance(values, Mapping):
+            return values
+        d = dict(values)
+        if "max_bytes" not in d:
+            for alias in ("rotate_size_bytes", "max_file_size", "rotation_size_bytes"):
+                if alias in d:
+                    d["max_bytes"] = d.pop(alias)
+                    break
+        return d
+
+
+ObserverSettings = ObserverConfig
+
+
 class Settings(BaseModel):
     """Top-level Arden settings."""
 
@@ -325,6 +353,7 @@ class Settings(BaseModel):
     surprise: SurpriseSettings = Field(default_factory=SurpriseSettings)
     mailbox: MailboxSettings = Field(default_factory=MailboxSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
+    observer: ObserverSettings = Field(default_factory=ObserverSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
@@ -378,6 +407,8 @@ __all__ = [
     "MailboxSettings",
     "MemoryConfig",
     "MemorySettings",
+    "ObserverConfig",
+    "ObserverSettings",
     "PerceptionSettings",
     "ServerConfig",
     "ServerSettings",

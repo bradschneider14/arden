@@ -50,6 +50,7 @@ from arden.memory.beliefs import (
 )
 from arden.memory.short_term import MemoryManager
 from arden.memory.store import EpisodeStore
+from arden.observer.log import ObserverLog
 from arden.perception.feed import Percept, PerceptionTracker, perceive
 from arden.surprise.scorer import SurpriseScorer, SurpriseSignal
 from arden.world.clock import WorldClock
@@ -263,6 +264,11 @@ class AgentLoop:
         k: int | None = None,
         perception_tracker: PerceptionTracker | None = None,
         surprise_scorer: SurpriseScorer | None = None,
+        observer_log: ObserverLog | bool | None = None,
+        run_id: str | None = None,
+        runs_dir: Path | str | None = None,
+        run_dir: Path | str | None = None,
+        max_bytes: int | None = None,
         on_wake: Callable[[str], None] | None = None,
         print_wakes: bool = False,
     ) -> None:
@@ -357,8 +363,71 @@ class AgentLoop:
         self._last_completed_intent_event: IntentEndedEvent | None = None
         self._last_controller_status: ControllerStatus = self.controller.status
         self._tick_events: list[WorldEvent] = []
+        self._external_memory_recording: bool = False
 
         self.world.events.subscribe(self._on_world_event)
+
+        existing_log = getattr(self.world, "observer_log", None)
+        if isinstance(observer_log, ObserverLog):
+            self.observer_log: ObserverLog | None = observer_log
+        elif observer_log is False:
+            self.observer_log = None
+        elif isinstance(existing_log, ObserverLog):
+            self.observer_log = existing_log
+        elif (
+            observer_log is True
+            or run_id is not None
+            or runs_dir is not None
+            or run_dir is not None
+            or max_bytes is not None
+        ):
+            self.observer_log = ObserverLog(
+                self.world,
+                run_id=run_id,
+                runs_dir=runs_dir,
+                run_dir=run_dir,
+                max_bytes=max_bytes,
+                settings=self.settings,
+            )
+        else:
+            self.observer_log = None
+
+        if self.observer_log is not None:
+            self.observer_log.settings = self.settings
+            self._sync_observer_metadata()
+
+    def _sync_observer_metadata(self) -> None:
+        if self.observer_log is None:
+            return
+        self.observer_log.save_metadata(
+            runner_meta={
+                "runner": "agent_loop",
+                "gate_type": type(self.gate).__name__,
+                "heartbeat_interval": getattr(
+                    self.gate,
+                    "heartbeat_interval",
+                    getattr(self.gate, "interval", self.settings.gate.heartbeat_interval),
+                ),
+                "gate_config": (
+                    self.gate.config.model_dump(mode="json")
+                    if hasattr(self.gate, "config") and hasattr(self.gate.config, "model_dump")
+                    else self.settings.gate.model_dump(mode="json")
+                ),
+                "use_perception_tracker": self.perception_tracker is not None,
+                "use_surprise_scorer": self.surprise_scorer is not None,
+                "has_memory": self.memory is not None,
+                "buffer_size": (
+                    self.memory.buffer.capacity
+                    if self.memory is not None
+                    else self.settings.memory.buffer_size
+                ),
+                "rest_idle_ticks": (
+                    self.memory.buffer.rest_idle_ticks
+                    if self.memory is not None
+                    else self.settings.memory.rest_idle_ticks
+                ),
+            }
+        )
 
     def _on_world_event(self, event: WorldEvent) -> None:
         if isinstance(event, GateDecisionEvent) or event.type == "gate_decision":
@@ -664,7 +733,7 @@ class AgentLoop:
         self.clock.step_once()
         self.ticks_run += 1
 
-        return TickResult(
+        tick_res = TickResult(
             tick=current_tick,
             percept=percept,
             decision=decision,
@@ -675,6 +744,22 @@ class AgentLoop:
             prompt=built_prompt,
             surprise_signal=surprise_signal,
         )
+        if self.memory is not None and not self._external_memory_recording:
+            if not controller_status.is_idle and controller_status.step is not None:
+                s_val = float(surprise_signal.score) if surprise_signal is not None else 0.0
+                s_kind = surprise_signal.kind if surprise_signal is not None else None
+                self.memory.buffer.add(
+                    tick=current_tick,
+                    observation=percept,
+                    action=controller_status.step,
+                    outcome=getattr(controller_status, "result", None),
+                    comfort=self.world.body.comfort,
+                    energy=self.world.body.energy,
+                    surprise=s_val,
+                    surprise_kind=s_kind,
+                    resting=False,
+                )
+        return tick_res
 
     step = tick
 
@@ -708,7 +793,13 @@ def run_headless(
     world: World | Path | str | Mapping[str, Any] | None = None,
     gate: Gate | None = None,
     controller: Controller | None = None,
+    memory: MemoryManager | None = None,
     heartbeat_interval: int | None = None,
+    observer_log: ObserverLog | bool | None = None,
+    run_id: str | None = None,
+    runs_dir: Path | str | None = None,
+    run_dir: Path | str | None = None,
+    max_bytes: int | None = None,
     print_wakes: bool = True,
 ) -> AgentLoop:
     """Run a headless simulation for ``ticks`` ticks and return the ``AgentLoop``."""
@@ -725,9 +816,15 @@ def run_headless(
         llm=backend_instance,
         gate=gate,
         controller=controller,
+        memory=memory,
         settings=cfg,
         rng=sim_rng,
         heartbeat_interval=heartbeat_interval,
+        observer_log=observer_log,
+        run_id=run_id,
+        runs_dir=runs_dir,
+        run_dir=run_dir,
+        max_bytes=max_bytes,
         print_wakes=print_wakes,
     )
     loop.run(ticks, print_wakes=print_wakes)

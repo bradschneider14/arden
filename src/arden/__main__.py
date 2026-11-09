@@ -22,6 +22,7 @@ from arden.config import Settings, load_config, make_rng
 from arden.llm.factory import make_backend
 from arden.llm.prompts import build_decide_prompt
 from arden.llm.schemas import Intent
+from arden.observer.replay import ReplayResult, replay_run
 from arden.server.app import run_server as _run_server
 from arden.world.world import World
 
@@ -132,6 +133,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Disable read-only spectator access.",
     )
+
+    replay_parser = subparsers.add_parser(
+        "replay",
+        help="Re-run a recorded run from its saved seed, creator actions, and logged intents",
+    )
+    replay_parser.add_argument(
+        "run_dir",
+        type=Path,
+        help="Path to the recorded run directory (e.g. data/runs/<run_id>).",
+    )
     return parser
 
 
@@ -210,6 +221,24 @@ def run_server(
     )
 
 
+def run_replay(run_dir: Path | str) -> ReplayResult:
+    """Re-run a recorded run directory and print the replay result."""
+    result = replay_run(run_dir)
+    if not result.diverged:
+        print(
+            f"replay: no divergence (run_id={result.run_id}, "
+            f"ticks={result.ticks_replayed}, records={result.records_checked})"
+        )
+    else:
+        div = result.first_divergence
+        assert div is not None
+        print(
+            f"replay: divergence at tick {div.tick} "
+            f"(kind={div.kind}, index={div.index}): {div.reason}"
+        )
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -258,6 +287,9 @@ def main(argv: list[str] | None = None) -> int:
             spectator_enabled=args.spectator_enabled,
         )
         return 0
+    if args.command == "replay":
+        res = run_replay(args.run_dir)
+        return 0 if not res.diverged else 1
     parser.print_help()
     return 0
 
